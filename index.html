@@ -99,6 +99,32 @@ details.card[open] summary::before{content:"▾ "}
 code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:12.5px;font-family:ui-monospace,monospace}
 .kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px dashed var(--line);font-size:14px}
 .kv:last-child{border:0}
+
+/* ==== 数据页新分段：概览/词库/曲线 ==== */
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:var(--soft);border-radius:9px;padding:3px;margin:0 0 12px}
+.seg button{background:none;border:0;font:inherit;font-size:13px;color:var(--muted);padding:7px 0;border-radius:7px;cursor:pointer}
+.seg button.on{background:var(--panel);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.librow{padding:10px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+.librow:last-child{border-bottom:0}
+.librow:active{background:var(--soft)}
+.librow .l1{display:flex;align-items:baseline;gap:6px}
+.librow .l1 b{font-size:15.5px}
+.librow .pos{font-size:11px;color:var(--muted)}
+.librow .l2{display:flex;align-items:center;gap:6px;margin-top:2px}
+.librow .mean{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--muted)}
+.librow .cnt{font-size:11px;color:var(--muted);flex:none}
+.badge{display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:4px;flex:none;line-height:1.6}
+.badge.new{background:#f5f5f4;color:#78716c}
+.badge.learning{background:#ffedd5;color:#c2410c}
+.badge.solid{background:#dbeafe;color:#1d4ed8}
+.badge.done{background:#dcfce7;color:#15803d}
+.badge.weak{background:#fee2e2;color:#b91c1c}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
+.chartbox{margin-top:10px}
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;font-size:11.5px;color:var(--muted)}
+.legend .lg{display:inline-flex;align-items:center;gap:4px}
+.legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+.statrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
 </style>
 </head>
 <body>
@@ -129,7 +155,7 @@ const DEFAULTS = {
     visionModel:'deepseek-v4-flash-vision-exp',
     textModel:'deepseek-v4-flash'
   },
-  batches:[], cards:{}, activeBatchId:null
+  batches:[], cards:{}, activeBatchId:null, reviewLog:[]
 };
 let DB = load();
 let state = {
@@ -143,7 +169,7 @@ function load(){
     if(!raw) return structuredClone(DEFAULTS);
     const d = JSON.parse(raw);
     d.settings = Object.assign(structuredClone(DEFAULTS.settings), d.settings||{});
-    d.batches = d.batches||[]; d.cards = d.cards||{};
+    d.batches = d.batches||[]; d.cards = d.cards||{}; d.reviewLog = Array.isArray(d.reviewLog)?d.reviewLog:[];
     return d;
   }catch(e){ return structuredClone(DEFAULTS); }
 }
@@ -549,6 +575,7 @@ function viewData(){
   const total = Object.keys(DB.cards).length;
   const weak = Object.values(DB.cards).filter(c=>c.lapses>0).sort((a,b)=>b.lapses-a.lapses).slice(0,10);
   return `
+  ${dataSegHTML()}
   <div class="card">
     <h2>接口设置</h2>
     <label class="fld"><span>API Key（只存在你这台设备上）</span>
@@ -636,10 +663,19 @@ function bind(){
     };
     r.readAsText(file);
   };
+  const q = $('#libQ');
+  if(q){ q.oninput = e=>{ libState.q = e.target.value; libState.page = 1; refreshLib(); }; }
+  const lf = $('#libFilter');
+  if(lf){ lf.onchange = e=>{ libState.filter = e.target.value; libState.page = 1; refreshLib(); }; }
+  const ls = $('#libSort');
+  if(ls){ ls.onchange = e=>{ libState.sort = e.target.value; libState.page = 1; refreshLib(); }; }
 }
 
 function handleAct(el){
   const act = el.dataset.act;
+  if(act==='dataTab'){ libState.tab = el.dataset.tab; libState.page = 1; state.view='data'; render(); return; }
+  if(act==='libPage'){ libState.page = Math.max(1, parseInt(el.dataset.p,10)||1); refreshLib(); return; }
+  if(act==='cardDetail'){ cardDetail(el.dataset.k); return; }
   if(act==='go'){ state.view = el.dataset.v; render(); window.scrollTo(0,0); return; }
   if(act==='clearImg'){ pendingImage=null; $('#imgPrev').innerHTML=''; el.disabled=true; return; }
   if(act==='generate'){ doGenerate(); return; }
@@ -1052,7 +1088,7 @@ function doRevCheck(){
 }
 function gradeReview(g){
   const c = state.reviewQueue[state.reviewIdx];
-  if(c){ schedule(c, g); save(); }
+  if(c){ schedule(c, g); logReview(c, g); save(); }
   state.reviewIdx++;
   if(state.reviewIdx >= state.reviewQueue.length){ closeSheet(); render(); toast('本轮复习完成'); }
   else renderReviewCard();
@@ -1094,6 +1130,261 @@ function exportAnki(){
   const tsv = rows.map(r=>r.map(x=>String(x).replace(/[\t\n\r]/g,' ')).join('\t')).join('\n');
   download('anki-'+todayStr()+'.txt', tsv, 'text/tab-separated-values;charset=utf-8');
   toast('已导出，Anki 导入时分隔符选 Tab');
+}
+
+
+/* ============ 数据页：概览 / 词库 / 曲线 ============ */
+const libState = { tab:'overview', page:1, q:'', filter:'all', sort:'due' };
+const LIB_PAGE = 50;
+
+function daysBetween(a, b){
+  const t1 = new Date(String(a)+'T00:00:00').getTime();
+  const t2 = new Date(String(b)+'T00:00:00').getTime();
+  if(isNaN(t1) || isNaN(t2)) return 0;
+  return Math.round((t1-t2)/86400000);
+}
+function cardStatus(c){
+  const l = c.lapses||0, st = c.step||0;
+  if(l>=3) return {k:'weak', t:'易忘'};
+  if((c.reps||0)===0) return {k:'new', t:'新词'};
+  if(st>=5 && l<=1) return {k:'done', t:'已掌握'};
+  if(st>=4) return {k:'solid', t:'巩固中'};
+  return {k:'learning', t:'学习中'};
+}
+function dueText(c){
+  const d = daysBetween(c.due || todayStr(), todayStr());
+  if(d===0) return '今天复习';
+  if(d>0) return '还有 '+d+' 天';
+  return '已过期 '+(-d)+' 天';
+}
+function logReview(c, g){
+  if(!Array.isArray(DB.reviewLog)) DB.reviewLog = [];
+  DB.reviewLog.push({ d: todayStr(), k: key(c.word), g: g });
+  const cut = addDays(-365);
+  if(DB.reviewLog.length > 4000 || (DB.reviewLog[0] && DB.reviewLog[0].d < cut)){
+    DB.reviewLog = DB.reviewLog.filter(x=> x.d >= cut).slice(-4000);
+  }
+}
+function rebindActs(root){
+  if(!root) return;
+  root.querySelectorAll('[data-act]').forEach(el=>{ el.onclick = ()=>handleAct(el); });
+}
+
+function dataSegHTML(){
+  const tabs = [['overview','概览'],['lib','词库'],['chart','曲线']];
+  const bar = '<div class="seg">' + tabs.map(([k,t])=>
+    `<button data-act="dataTab" data-tab="${k}" class="${libState.tab===k?'on':''}">${t}</button>`
+  ).join('') + '</div>';
+  if(libState.tab==='lib') return bar + libHTML();
+  if(libState.tab==='chart') return bar + chartHTML();
+  return bar + overviewHTML();
+}
+
+function overviewHTML(){
+  const all = Object.values(DB.cards);
+  const dueN = all.filter(c=> c.due && c.due<=todayStr()).length;
+  const cnt = k => all.filter(c=> cardStatus(c).k===k).length;
+  const weak = all.filter(c=> (c.lapses||0)>0).sort((a,b)=> b.lapses-a.lapses).slice(0,10);
+  return `
+  <div class="card">
+    <div class="kv"><span>词库总量</span><b>${all.length} 词</b></div>
+    <div class="kv"><span>待复习</span><b>${dueN} 词</b></div>
+    <div class="kv"><span>已掌握</span><b>${cnt('done')} 词</b></div>
+    <div class="statrow">
+      <span class="badge new">新词 ${cnt('new')}</span>
+      <span class="badge learning">学习中 ${cnt('learning')}</span>
+      <span class="badge solid">巩固中 ${cnt('solid')}</span>
+      <span class="badge done">已掌握 ${cnt('done')}</span>
+      <span class="badge weak">易忘 ${cnt('weak')}</span>
+    </div>
+  </div>
+  ${weak.length ? `<div class="card"><h2>最容易忘的词</h2>
+    ${weak.map(c=>`<div class="kv"><span>${esc(c.word)}</span><span class="small muted">忘 ${c.lapses} 次 · ${esc(c.meaning)}</span></div>`).join('')}
+  </div>` : ''}`;
+}
+
+function libFiltered(){
+  const raw = (libState.q||'').trim();
+  const q = raw.toLowerCase();
+  let list = Object.values(DB.cards).filter(c=>{
+    if(q){
+      const w = String(c.word||'').toLowerCase();
+      const m = String(c.meaning||'');
+      if(w.indexOf(q)<0 && m.indexOf(raw)<0) return false;
+    }
+    if(libState.filter==='all') return true;
+    return cardStatus(c).k === libState.filter;
+  });
+  if(libState.sort==='lapse') list.sort((a,b)=> (b.lapses||0)-(a.lapses||0));
+  else if(libState.sort==='word') list.sort((a,b)=> String(a.word).localeCompare(String(b.word)));
+  else list.sort((a,b)=> String(a.due||'').localeCompare(String(b.due||'')) || String(a.word).localeCompare(String(b.word)));
+  return list;
+}
+function libRowHTML(c){
+  const st = cardStatus(c);
+  return `<div class="librow" data-act="cardDetail" data-k="${esc(key(c.word))}">
+    <div class="l1"><b>${esc(c.word)}</b>${c.pos?`<span class="pos">${esc(c.pos)}</span>`:''}</div>
+    <div class="l2"><span class="mean">${esc(c.meaning||'—')}</span><span class="badge ${st.k}">${st.t}</span><span class="cnt">${dueText(c)}</span></div>
+  </div>`;
+}
+function pagerHTML(pages){
+  return `<button class="btn sm" data-act="libPage" data-p="${libState.page-1}"${libState.page<=1?' disabled':''}>上一页</button>
+    <span class="small muted">第 ${libState.page} / ${pages} 页</span>
+    <button class="btn sm" data-act="libPage" data-p="${libState.page+1}"${libState.page>=pages?' disabled':''}>下一页</button>`;
+}
+function emptyLibHTML(){
+  return Object.keys(DB.cards).length ? '<div class="empty">没有符合条件的词</div>'
+    : '<div class="empty">还没有词，去「新词」页生成第一批</div>';
+}
+function libHTML(){
+  const list = libFiltered();
+  const pages = Math.max(1, Math.ceil(list.length/LIB_PAGE));
+  if(libState.page > pages) libState.page = pages;
+  const slice = list.slice((libState.page-1)*LIB_PAGE, libState.page*LIB_PAGE);
+  return `<div class="card">
+    <input id="libQ" placeholder="搜索单词或释义…" value="${esc(libState.q)}">
+    <div class="grid2" style="margin-top:8px">
+      <select id="libFilter">
+        <option value="all"${libState.filter==='all'?' selected':''}>全部状态</option>
+        <option value="new"${libState.filter==='new'?' selected':''}>新词</option>
+        <option value="learning"${libState.filter==='learning'?' selected':''}>学习中</option>
+        <option value="solid"${libState.filter==='solid'?' selected':''}>巩固中</option>
+        <option value="done"${libState.filter==='done'?' selected':''}>已掌握</option>
+        <option value="weak"${libState.filter==='weak'?' selected':''}>易忘</option>
+      </select>
+      <select id="libSort">
+        <option value="due"${libState.sort==='due'?' selected':''}>按下次复习</option>
+        <option value="lapse"${libState.sort==='lapse'?' selected':''}>按遗忘次数</option>
+        <option value="word"${libState.sort==='word'?' selected':''}>按字母</option>
+      </select>
+    </div>
+    <p class="muted small" id="libCount" style="margin:8px 0 2px">共 ${list.length} 个词</p>
+    <div id="libBox">${slice.length?slice.map(libRowHTML).join(''):emptyLibHTML()}</div>
+    <div class="pager" id="libPager">${pages>1?pagerHTML(pages):''}</div>
+  </div>`;
+}
+function refreshLib(){
+  const box = $('#libBox'); if(!box) return;
+  const list = libFiltered();
+  const pages = Math.max(1, Math.ceil(list.length/LIB_PAGE));
+  if(libState.page > pages) libState.page = pages;
+  const slice = list.slice((libState.page-1)*LIB_PAGE, libState.page*LIB_PAGE);
+  box.innerHTML = slice.length ? slice.map(libRowHTML).join('') : emptyLibHTML();
+  const cnt = $('#libCount'); if(cnt) cnt.textContent = '共 '+list.length+' 个词';
+  const pg = $('#libPager'); if(pg){ pg.innerHTML = pages>1?pagerHTML(pages):''; rebindActs(pg); }
+  rebindActs(box);
+}
+
+function cardDetail(k){
+  const c = DB.cards[k];
+  if(!c){ toast('这个词不在词库里'); return; }
+  const st = cardStatus(c);
+  const b = DB.batches.find(x=> x.id===c.batchId);
+  openSheet(`
+    <h2 style="margin:0 0 4px">${esc(c.word)}</h2>
+    <p class="muted small" style="margin:0 0 10px">${esc(c.ipa||'')}</p>
+    <div class="kv"><span>状态</span><span class="badge ${st.k}">${st.t}</span></div>
+    <div class="kv"><span>释义</span><b style="text-align:right">${esc(c.meaning||'—')}</b></div>
+    ${c.pos?`<div class="kv"><span>词性</span><span>${esc(c.pos)}</span></div>`:''}
+    <div class="kv"><span>复习轮次</span><span>${c.reps||0} 次</span></div>
+    <div class="kv"><span>遗忘次数</span><span>${c.lapses||0} 次</span></div>
+    <div class="kv"><span>下次复习</span><span>${esc(c.due||'—')} · ${dueText(c)}</span></div>
+    ${c.last?`<div class="kv"><span>上次复习</span><span>${esc(c.last)}</span></div>`:''}
+    ${b?`<div class="kv"><span>所属批次</span><span>${esc(b.goal||'未设目标')}</span></div>`:''}
+    ${c.tips?`<p class="muted small" style="margin-top:10px">${esc(c.tips)}</p>`:''}
+    <button class="btn block" data-act="sheetClose" style="margin-top:14px">关闭</button>
+  `);
+}
+
+function chartHTML(){
+  return `
+  <div class="card">
+    <h2>未来 30 天复习量</h2>
+    <div class="chartbox">${chartDue30()}</div>
+    <p class="muted small" style="margin-top:6px">深色柱＝今天；已过期的词计入今天。</p>
+  </div>
+  <div class="card">
+    <h2>记忆状态分布</h2>
+    <div class="chartbox">${chartStatusBar()}</div>
+  </div>
+  <div class="card">
+    <h2>最近 14 天复习量</h2>
+    <div class="chartbox">${chartDaily()}</div>
+  </div>`;
+}
+function chartDue30(){
+  const t = todayStr();
+  const buckets = [];
+  for(let i=0;i<30;i++) buckets.push({ n:0 });
+  Object.values(DB.cards).forEach(c=>{
+    if(!c.due) return;
+    let i = daysBetween(c.due, t);
+    if(i < 0) i = 0;
+    if(i < 30) buckets[i].n++;
+  });
+  const max = Math.max(1, ...buckets.map(b=>b.n));
+  const W = 320, H = 120, pad = 16, plotH = H - pad - 12;
+  const gap = (W - pad*2) / 30, bw = gap * 0.62;
+  let bars = '';
+  buckets.forEach((b,i)=>{
+    if(!b.n) return;
+    const h = Math.max(2, b.n/max*plotH);
+    const x = pad + i*gap + (gap-bw)/2;
+    const y = H - pad - h;
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${i===0?'#c2410c':'#a8a29e'}"/>`;
+    if(i===0) bars += `<text x="${(x+bw/2).toFixed(1)}" y="${(y-3).toFixed(1)}" font-size="8.5" fill="#c2410c" text-anchor="middle">${b.n}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    <line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="#e7e5e4"/>
+    ${bars}
+    <text x="${pad}" y="${H-3}" font-size="8.5" fill="#78716c">今天</text>
+    <text x="${W-pad}" y="${H-3}" font-size="8.5" fill="#78716c" text-anchor="end">30天后</text>
+    <text x="${W-pad}" y="11" font-size="8.5" fill="#78716c" text-anchor="end">峰值 ${max} 词/天</text>
+  </svg>`;
+}
+function chartStatusBar(){
+  const all = Object.values(DB.cards);
+  if(!all.length) return '<div class="empty">还没有词</div>';
+  const order = [['new','新词','#a8a29e'],['learning','学习中','#ea580c'],['solid','巩固中','#2563eb'],['done','已掌握','#15803d'],['weak','易忘','#b91c1c']];
+  const counts = {}; order.forEach(o=>counts[o[0]]=0);
+  all.forEach(c=>{ const k = cardStatus(c).k; counts[k] = (counts[k]||0)+1; });
+  const total = all.length, W = 320, H = 24;
+  let x = 0, rects = '';
+  order.forEach(o=>{
+    const w = counts[o[0]]/total*W;
+    if(w>0) rects += `<rect x="${x.toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${H}" fill="${o[2]}"/>`;
+    x += w;
+  });
+  const legend = order.map(o=>`<span class="lg"><i style="background:${o[2]}"></i>${o[1]} ${counts[o[0]]}</span>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:22px;display:block;border-radius:5px;overflow:hidden">${rects}</svg>
+    <div class="legend">${legend}</div>`;
+}
+function chartDaily(){
+  const log = Array.isArray(DB.reviewLog)?DB.reviewLog:[];
+  if(!log.length) return '<div class="empty">从今天开始记录，明天这里会有数据</div>';
+  const days = [];
+  for(let i=13;i>=0;i--) days.push(addDays(-i));
+  const map = {};
+  log.forEach(x=>{ map[x.d] = (map[x.d]||0)+1; });
+  const vals = days.map(d=> map[d]||0);
+  const max = Math.max(1, ...vals);
+  const W = 320, H = 110, pad = 14, plotH = H - pad - 12;
+  const gap = (W - pad*2) / 14, bw = gap * 0.62;
+  let bars = '';
+  vals.forEach((v,i)=>{
+    if(!v) return;
+    const h = Math.max(2, v/max*plotH);
+    const x = pad + i*gap + (gap-bw)/2;
+    const y = H - pad - h;
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="#c2410c" opacity="${0.45 + 0.55*i/13}"/>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+    <line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="#e7e5e4"/>
+    ${bars}
+    <text x="${pad}" y="${H-3}" font-size="8.5" fill="#78716c">14天前</text>
+    <text x="${W-pad}" y="${H-3}" font-size="8.5" fill="#78716c" text-anchor="end">今天</text>
+    <text x="${W-pad}" y="11" font-size="8.5" fill="#78716c" text-anchor="end">峰值 ${max} 次/天</text>
+  </svg>`;
 }
 
 /* ============ Sheet ============ */
