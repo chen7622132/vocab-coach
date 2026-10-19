@@ -304,6 +304,39 @@ function schedule(card, grade){
   card.last = todayStr();
   return card;
 }
+function toggleMark(i){
+  const b = curBatch();
+  if(!b || !b.words[i]){ toast('找不到这个词'); return; }
+  const w = b.words[i];
+  let c = DB.cards[key(w.word)];
+  if(!c) c = upsertCard(w, b.id);
+  c.unknown = !c.unknown;
+  if(c.unknown && String(c.due||'') > todayStr()) c.due = todayStr();
+  save(); render();
+  toast(c.unknown ? '已标记不熟，今天会出现在待复习里' : '已取消标记');
+}
+function deleteBatch(id){
+  const b = DB.batches.find(x=> x.id===id);
+  if(!b) return;
+  const ks = b.words.map(w=> key(w.word));
+  const mine = ks.filter(k=> DB.cards[k] && DB.cards[k].batchId===id);
+  const inReview = mine.filter(k=> (DB.cards[k].reps||0)>0);
+  let msg = '删除第 '+ (DB.batches.findIndex(x=>x.id===id)+1) +' 批（'+(b.goal||'未设目标')+'，'+b.words.length+' 个词）？';
+  if(mine.length){
+    msg += '\n\n其中 '+mine.length+' 个词的复习记录会被一并删除';
+    if(inReview.length) msg += '（含 '+inReview.length+' 个已开始复习的词）';
+  }else{
+    msg += '\n\n这些词还没有复习记录，删除无影响。';
+  }
+  if(!confirm(msg)) return;
+  mine.forEach(k=>{ delete DB.cards[k]; });
+  DB.batches = DB.batches.filter(x=> x.id!==id);
+  if(DB.activeBatchId===id){
+    DB.activeBatchId = DB.batches.length ? DB.batches[DB.batches.length-1].id : null;
+  }
+  save(); render();
+  toast('已删除该批次');
+}
 function todayNewCount(){
   const t = todayStr();
   return Object.values(DB.cards).filter(c=> c.added===t).length;
@@ -640,10 +673,16 @@ function viewData(){
   </div>`:''}
 
   <div class="card">
-    <h2>当前批次</h2>
+    <h2>批次管理</h2>
+    <p class="muted small" style="margin:0 0 6px">共 ${DB.batches.length} 批 · 删除会一并清掉该批词的复习记录</p>
     ${DB.batches.length?DB.batches.map((b,i)=>`<div class="kv">
-      <span>${i+1}. ${esc(b.goal||'未设目标')} <span class="small muted">${b.words.length}词</span></span>
-      <button class="btn sm ${b.id===DB.activeBatchId?'accent':''}" data-act="switchBatch" data-id="${b.id}">${b.id===DB.activeBatchId?'当前':'切到'}</button>
+      <span style="min-width:0;flex:1">${i+1}. ${esc(b.goal||'未设目标')}
+        <span class="small muted">${esc(b.createdAt||'')} · ${b.words.length}词${(b.article&&b.article.text)?' · 有文章':''}</span>
+      </span>
+      <span style="flex:none;display:flex;gap:6px">
+        <button class="btn sm ${b.id===DB.activeBatchId?'accent':''}" data-act="switchBatch" data-id="${b.id}">${b.id===DB.activeBatchId?'当前':'切到'}</button>
+        <button class="btn sm" data-act="delBatch" data-id="${b.id}" style="color:var(--bad)">删除</button>
+      </span>
     </div>`).join(''):`<p class="muted small">暂无</p>`}
   </div>
   <p class="muted small" style="text-align:center">v2.0 · 八步闭环完整版</p>`;
@@ -699,6 +738,7 @@ function handleAct(el){
   if(act==='dataTab'){ libState.tab = el.dataset.tab; libState.page = 1; state.view='data'; render(); return; }
   if(act==='libPage'){ libState.page = Math.max(1, parseInt(el.dataset.p,10)||1); refreshLib(); return; }
   if(act==='cardDetail'){ cardDetail(el.dataset.k); return; }
+  if(act==='delBatch'){ deleteBatch(el.dataset.id); return; }
   if(act==='go'){ state.view = el.dataset.v; render(); window.scrollTo(0,0); return; }
   if(act==='clearImg'){ pendingImage=null; $('#imgPrev').innerHTML=''; el.disabled=true; return; }
   if(act==='generate'){ doGenerate(); return; }
