@@ -153,7 +153,8 @@ const DEFAULTS = {
   settings:{
     apiKey:'', baseUrl:'https://api.deepseek.com', proxy:'',
     visionModel:'deepseek-v4-flash-vision-exp',
-    textModel:'deepseek-v4-flash'
+    textModel:'deepseek-v4-flash',
+    newPerDay:20
   },
   batches:[], cards:{}, activeBatchId:null, reviewLog:[]
 };
@@ -173,7 +174,12 @@ function load(){
     return d;
   }catch(e){ return structuredClone(DEFAULTS); }
 }
-function save(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(DB)); }catch(e){ toast('保存失败：浏览器存储已满'); } }
+function save(){
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(DB)); }
+  catch(e){
+    alert('⚠️ 保存失败：本地存储已满。\n\n刚才这一步的数据没有存上。\n请立刻到「数据」页导出 JSON 备份，否则新记录会继续丢失。');
+  }
+}
 
 /* ============ 工具 ============ */
 const $ = s => document.querySelector(s);
@@ -298,11 +304,18 @@ function schedule(card, grade){
   card.last = todayStr();
   return card;
 }
+function todayNewCount(){
+  const t = todayStr();
+  return Object.values(DB.cards).filter(c=> c.added===t).length;
+}
+function storageMB(){
+  try{ return JSON.stringify(DB).length*2/1048576; }catch(e){ return 0; }
+}
 function upsertCard(w, batchId){
   const k = key(w.word);
   if(!DB.cards[k]){
     DB.cards[k] = { word:w.word, ipa:w.ipa||'', meaning:w.meaning||'', tips:w.tips||'', batchId,
-      step:0, due:addDays(1), reps:0, lapses:0, last:null, unknown:false };
+      step:0, due:addDays(1), reps:0, lapses:0, last:null, unknown:false, added:todayStr() };
   }else{
     if(w.meaning) DB.cards[k].meaning = w.meaning;
     if(w.ipa) DB.cards[k].ipa = w.ipa;
@@ -335,12 +348,19 @@ function viewHome(){
   const due = dueCards();
   const total = Object.keys(DB.cards).length;
   const learned = Object.values(DB.cards).filter(c=>c.reps>0).length;
+  const limit = Number(DB.settings.newPerDay)||0;
+  const todayNew = todayNewCount();
+  const overLimit = limit>0 && todayNew>limit;
   return `
   <div class="card">
     <div class="kv"><span>待复习</span><b style="color:${due.length?'var(--accent)':'var(--ok)'}">${due.length} 个</b></div>
     <div class="kv"><span>词库总量</span><b>${total} 个</b></div>
     <div class="kv"><span>已练习过</span><b>${learned} 个</b></div>
+    <div class="kv"><span>今日新词</span><b style="color:${overLimit?'var(--bad)':'inherit'}">${todayNew}${limit>0?' / '+limit:'（不限）'}</b></div>
   </div>
+  ${overLimit?`<div class="card" style="border-color:#fecaca;background:#fef2f2">
+    <p class="small" style="color:var(--bad);margin:0">今天已经加了 ${todayNew} 个新词，超过你设的每天 ${limit} 个。建议今天只复习、明天再加新词——一次塞太多，明天复习量会堆到做不完。</p>
+  </div>`:''}
   ${due.length?`
     <div class="card">
       <h2>今天要复习 ${due.length} 个词</h2>
@@ -592,6 +612,9 @@ function viewData(){
     </label>
     <label class="fld"><span>纯文本模型名</span>
       <input id="s_textModel" value="${esc(s.textModel)}">
+    </label>
+    <label class="fld"><span>每天新词上限（0 = 不限，建议 15–20）</span>
+      <input id="s_newPerDay" type="number" min="0" max="500" value="${Number(s.newPerDay)||0}">
     </label>
     <button class="btn primary block" data-act="saveSettings">保存设置</button>
     <p class="muted small" style="margin-top:8px">模型名会变。若报 400，去 DeepSeek 文档复制当前模型 ID 填这里。</p>
@@ -1101,6 +1124,7 @@ function saveSettings(){
   DB.settings.proxy = $('#s_proxy').value.trim();
   DB.settings.visionModel = $('#s_visionModel').value.trim();
   DB.settings.textModel = $('#s_textModel').value.trim();
+  DB.settings.newPerDay = Math.max(0, parseInt($('#s_newPerDay').value, 10) || 0);
   save(); render(); toast('已保存');
 }
 function download(name, content, type){
@@ -1190,6 +1214,8 @@ function overviewHTML(){
     <div class="kv"><span>词库总量</span><b>${all.length} 词</b></div>
     <div class="kv"><span>待复习</span><b>${dueN} 词</b></div>
     <div class="kv"><span>已掌握</span><b>${cnt('done')} 词</b></div>
+    <div class="kv"><span>今日新词</span><b>${todayNewCount()}${Number(DB.settings.newPerDay)>0?' / '+Number(DB.settings.newPerDay):'（不限）'}</b></div>
+    <div class="kv"><span>本地占用</span><b style="color:${storageMB()>3.5?'var(--bad)':'inherit'}">${storageMB().toFixed(2)} MB / 约 5 MB</b></div>
     <div class="statrow">
       <span class="badge new">新词 ${cnt('new')}</span>
       <span class="badge learning">学习中 ${cnt('learning')}</span>
