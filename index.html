@@ -128,6 +128,12 @@ code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:12.5px;f
 .snd{background:none;border:0;padding:0 5px;margin:0;font-size:14px;line-height:1;cursor:pointer;opacity:.7;vertical-align:middle;font-family:inherit}
 .snd:active{transform:scale(.88);opacity:1}
 .snd.off{opacity:.35;cursor:help}
+.article .sent{cursor:pointer;border-radius:3px;transition:background .12s}
+.article .sent:active{background:#fef3c7}
+.article .sent.saying{background:#fef3c7;box-shadow:inset 0 -2px 0 #f59e0b}
+.readbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.qgroup{font-size:12px;color:var(--muted);margin:0 0 8px}
+input[type=range]{padding:0;border:0;background:none}
 </style>
 </head>
 <body>
@@ -151,7 +157,7 @@ code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:12.5px;f
 
 <script>
 /* ============ 存储 ============ */
-const APP_VERSION = 'v18';
+const APP_VERSION = 'v19';
 const BUILD = '2026-10-20';
 const LS_KEY = 'vocab_coach_db_v1';
 const REVIEW_PER_ROUND = 20;
@@ -162,7 +168,11 @@ const DEFAULTS = {
     visionModel:'deepseek-v4-flash-vision-exp',
     textModel:'deepseek-v4-flash',
     newPerDay:20,
-    reviewPerDay:60
+    reviewPerDay:60,
+    maxWords:12,
+    practiceMode:'all',
+    voiceName:'',
+    voiceRate:1
   },
   batches:[], cards:{}, activeBatchId:null, reviewLog:[]
 };
@@ -260,6 +270,8 @@ function parseJSON(txt){
 /* ============ 生成 Prompt ============ */
 function buildPrompt(o){
   const src = o.hasImage ? '这张图片' : '下面的内容';
+  o = Object.assign({}, o);
+  o.maxWords = clampNum(DB.settings.maxWords, 5, 25, 12);
   return `你是「语境化词汇学习教练」。请从${src}中提取英语生词（跳过 the/a/is 这类过于基础的词），只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释。
 
 JSON 结构（严格遵守字段名）：
@@ -273,10 +285,10 @@ JSON 结构（严格遵守字段名）：
 1. 每个词必须给 2 个不同语境的例句；每句都必须配中文翻译和「本句词义」（如 "①极其重要的"）。
 2. 一词多义时，两句尽量覆盖不同义项；senses 列出全部义项（含未在例句中出现的）。
 3. ipa 用英式或美式音标均可；cefr 只填 A1/A2/B1/B2/C1；derivatives 填派生词或高频搭配，没有就空字符串。
-4. article：用全部词写一篇 300–500 词的叙事短文（开头-冲突-结尾），目标词全部出现并用 **加粗**，wordCount 填实际词数。translation 必须逐段对应 text，段数完全相同。
+4. article：用全部词写一篇 130–200 词的叙事短文（开头-冲突-结尾），读起来要像真人写的小故事，不要为了塞词而写生硬句子；目标词全部出现并用 **加粗**，wordCount 填实际词数。translation 必须逐段对应 text，段数完全相同。
 5. quiz：8–12 题，只用 fill（例句挖空）/spell（给中文释义写英文）/sense（判断该词在此句的词义）/collocation（搭配辨析）；answer 多个可接受答案用 | 分隔；不要出选择题；每题的 word 必须是 words 里出现过的词原形。
 6. 全部用简体中文解释，英文只用在例句和单词本身。
-7. words 最多 25 个：超过 25 个只保留最值得学的 25 个（优先中高频、易混、考试常见）；少于 12 个就全部使用，不要编造。
+7. words 最多 ${o.maxWords} 个：超过 ${o.maxWords} 个就只保留最值得学的 ${o.maxWords} 个（优先中高频、易混、考试常见）；不足 5 个时把原文里能找到的都列出来，不要编造。
 8. 每个词必须有 tips：2–3 句中文讲「怎么记」——词根/词源、高频搭配、易混词对比、记忆钩子，任选最有用的写，不要空话。
 9. 每个词必须有 core：true 表示本批最该先掌握的核心词（最多 8 个），其余 false。
 
@@ -410,6 +422,215 @@ function voiceStateText(){
   if(VOICE.blocked) return '语音接口被系统禁用了（常见于鸿蒙坚盾守护/省电模式），已改用音标。';
   if(!VOICE.voice) return '语音接口可用，但还没读到英文语音包。点下方按钮测一下。';
   return '语音接口正常，当前音色：' + (VOICE.voice.name || '英文语音') + '。';
+}
+
+
+/* ============ 语速 / 音色 ============ */
+function clampNum(v, lo, hi, dft){
+  const n = Number(v);
+  if(!isFinite(n)) return dft;
+  return Math.min(hi, Math.max(lo, n));
+}
+function voiceRate(){
+  return clampNum(DB.settings.voiceRate, 0.5, 1.5, 1);
+}
+function voiceRateLabel(){ return voiceRate().toFixed(1) + 'x'; }
+function setRate(v){
+  DB.settings.voiceRate = clampNum(v, 0.5, 1.5, 1);
+  save();
+  if(SPEAK.on){
+    try{ window.speechSynthesis.cancel(); }catch(e){}
+    SPEAK.on = false; SPEAK.list = []; SPEAK.i = 0;
+    clearSpeakTimer(); clearSaying();
+  }
+  render();
+  toast('语速 ' + voiceRateLabel() + (VOICE.api ? '' : '（这台设备不能朗读）'));
+}
+function cycleRate(){
+  const seq = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3];
+  const cur = voiceRate();
+  let at = -1;
+  for(let i=0;i<seq.length;i++){ if(Math.abs(seq[i]-cur) < 0.01){ at = i; break; } }
+  setRate(seq[(at < 0 ? 3 : at + 1) % seq.length]);
+}
+function enVoices(){
+  if(!VOICE.api) return [];
+  let vs = [];
+  try{ vs = window.speechSynthesis.getVoices() || []; }catch(e){ vs = []; }
+  const out = [];
+  for(let i=0;i<vs.length;i++){
+    if(/^en([-_]|$)/i.test(String(vs[i].lang || ''))) out.push(vs[i]);
+  }
+  return out;
+}
+function pickVoiceByName(name){
+  const list = enVoices();
+  if(!list.length) return null;
+  const want = String(name || '');
+  let hit = null;
+  for(let i=0;i<list.length;i++){ if(String(list[i].name || '') === want){ hit = list[i]; break; } }
+  VOICE.voice = hit || VOICE.voice || list[0];
+  return VOICE.voice;
+}
+function voiceOptionsHTML(){
+  const list = enVoices();
+  const cur = String(DB.settings.voiceName || '');
+  let html = '<option value="">自动（设备默认英文音色）</option>';
+  for(let i=0;i<list.length;i++){
+    const n = String(list[i].name || '');
+    html += '<option value="' + esc(n) + '"' + (n === cur ? ' selected' : '') + '>' +
+      esc(n) + ' · ' + esc(String(list[i].lang || '')) + (list[i].localService ? '' : '（联网）') + '</option>';
+  }
+  return html;
+}
+function refreshVoices(){
+  detectVoice();
+  pickVoiceByName(DB.settings.voiceName);
+  render();
+  const n = enVoices().length;
+  toast(n ? ('找到 ' + n + ' 个英文音色，选一个试试') : '没读到英文音色，去手机设置里装个英文语音包再点我');
+}
+
+/* ============ 句子切分（渲染与朗读共用，保证序号一致） ============ */
+function splitSentences(txt){
+  const s = String(txt || '').replace(/\s+/g, ' ').trim();
+  if(!s) return [];
+  const abbr = /^(mr|mrs|ms|dr|prof|st|jr|sr|vs|etc|e\.g|i\.e|no)$/i;
+  const out = [];
+  let buf = '';
+  for(let i=0;i<s.length;i++){
+    const ch = s.charAt(i);
+    buf += ch;
+    if(ch === '.' || ch === '!' || ch === '?'){
+      const next = i + 1 < s.length ? s.charAt(i + 1) : '';
+      const m = buf.match(/([A-Za-z.]+)\.$/);
+      const isAbbr = !!(m && abbr.test(m[1]));
+      if((next === '' || next === ' ' || next === '"' || next === "'") && !isAbbr){
+        if(buf.trim()) out.push(buf.trim());
+        buf = '';
+      }
+    }
+  }
+  if(buf.trim()) out.push(buf.trim());
+  return out;
+}
+function artSentenceList(text){
+  const paras = splitParas(text || '');
+  const out = [];
+  let idx = 0;
+  for(let p=0;p<paras.length;p++){
+    const ss = splitSentences(paras[p]);
+    for(let k=0;k<ss.length;k++){
+      out.push({ idx: idx++, para: p, text: ss[k].replace(/\*\*/g, '') });
+    }
+  }
+  return out;
+}
+
+/* ============ 朗读队列 ============ */
+const SPEAK = { list: [], i: 0, on: false, timer: null };
+
+function clearSpeakTimer(){
+  if(SPEAK.timer){ try{ clearTimeout(SPEAK.timer); }catch(e){} SPEAK.timer = null; }
+}
+function clearSaying(){
+  const root = document.getElementById('art');
+  if(!root) return;
+  const all = root.querySelectorAll('.sent');
+  for(let i=0;i<all.length;i++) all[i].classList.remove('saying');
+}
+function stopReading(silent){
+  SPEAK.on = false; SPEAK.list = []; SPEAK.i = 0;
+  clearSpeakTimer();
+  try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
+  clearSaying();
+  if(!silent){ try{ render(); }catch(e){} }
+}
+function speakText(text, onend){
+  const t = String(text || '').trim();
+  if(!t){ if(onend) onend(); return; }
+  if(!canSpeak()){ markVoiceBlocked('这台设备不能朗读'); if(onend) onend(); return; }
+  let done = false;
+  const fin = function(){ if(done) return; done = true; clearSpeakTimer(); if(onend) onend(); };
+  try{
+    const u = new SpeechSynthesisUtterance(t);
+    if(VOICE.voice){ u.voice = VOICE.voice; u.lang = VOICE.voice.lang || 'en-US'; }
+    else { u.lang = 'en-US'; }
+    u.rate = voiceRate(); u.pitch = 1; u.volume = 1;
+    u.onstart = function(){ VOICE.started = true; };
+    u.onend = fin;
+    u.onerror = function(ev){
+      const code = ev && ev.error ? String(ev.error) : '';
+      if(code === 'interrupted' || code === 'canceled'){ fin(); return; }
+      markVoiceBlocked('系统拒绝朗读（' + (code || 'unknown') + '）');
+      fin();
+    };
+    window.speechSynthesis.speak(u);
+    const guess = Math.max(4000, Math.round(t.length * 130 / voiceRate()));
+    clearSpeakTimer();
+    SPEAK.timer = setTimeout(fin, guess);
+  }catch(e){ markVoiceBlocked('朗读接口调不起来'); fin(); }
+}
+function highlightSi(idx){
+  const root = document.getElementById('art');
+  if(!root) return;
+  const all = root.querySelectorAll('.sent');
+  for(let i=0;i<all.length;i++) all[i].classList.remove('saying');
+  const hit = root.querySelector('[data-si="' + idx + '"]');
+  if(hit){
+    hit.classList.add('saying');
+    try{ hit.scrollIntoView({ block:'center', behavior:'smooth' }); }catch(e){}
+  }
+}
+function readArticle(){
+  const b = curBatch();
+  if(!b){ toast('先选一批词'); return; }
+  const a = activeArticle(b) || {};
+  const list = artSentenceList(a.text);
+  if(!list.length){ toast('这篇文章还没有正文'); return; }
+  if(!canSpeak()){ markVoiceBlocked('这台设备不能朗读'); return; }
+  try{ window.speechSynthesis.cancel(); }catch(e){}
+  SPEAK.list = list; SPEAK.i = 0; SPEAK.on = true;
+  speakStep();
+}
+function speakStep(){
+  if(!SPEAK.on) return;
+  const item = SPEAK.list[SPEAK.i];
+  if(!item){ stopReading(true); try{ render(); }catch(e){} toast('读完了'); return; }
+  highlightSi(item.idx);
+  speakText(item.text, function(){
+    if(!SPEAK.on) return;
+    SPEAK.i++;
+    speakStep();
+  });
+}
+function readFromSi(idx){
+  const b = curBatch();
+  if(!b) return;
+  const a = activeArticle(b) || {};
+  const list = artSentenceList(a.text);
+  if(!list.length) return;
+  if(!canSpeak()){ markVoiceBlocked('这台设备不能朗读'); return; }
+  let start = 0;
+  for(let i=0;i<list.length;i++){ if(list[i].idx === Number(idx)){ start = i; break; } }
+  try{ window.speechSynthesis.cancel(); }catch(e){}
+  SPEAK.list = list; SPEAK.i = start; SPEAK.on = true;
+  speakStep();
+}
+function togglePauseRead(){
+  if(!SPEAK.on){ readArticle(); return; }
+  try{
+    const sp = window.speechSynthesis;
+    if(sp.paused){ sp.resume(); toast('继续朗读'); }
+    else { sp.pause(); toast('已暂停，点 ▶ 继续'); }
+  }catch(e){ toast('这台设备不支持暂停，用 ■ 停止'); }
+}
+function readBarHTML(){
+  if(!canSpeak()) return '';
+  return '<button class="btn sm accent" data-act="readArticle">▶ 朗读全文</button>' +
+         '<button class="btn sm" data-act="readPause">❚❚ 暂停/继续</button>' +
+         '<button class="btn sm" data-act="readStop">■ 停止</button>' +
+         '<button class="btn sm" data-act="cycleRate">语速 ' + voiceRateLabel() + '</button>';
 }
 
 /* ============ 今日复习计数（去重：同一个词当天只算一次，错词回炉不重复计） ============ */
@@ -555,7 +776,13 @@ function viewHome(){
   ${due.length?`
     <div class="card">
       <h2>今天要复习 ${due.length} 个词</h2>
-      <p class="muted small">按遗忘曲线排的，做完就结束。</p>
+      <p class="muted small" style="margin-bottom:8px">按遗忘曲线排的，做完就结束。</p>
+      <div class="row" style="margin-bottom:10px">
+        <span class="small muted">练什么</span>
+        <button class="btn sm ${(DB.settings.practiceMode||'all')==='all'?'accent':''}" data-act="setMode" data-v="all">句子+单词</button>
+        <button class="btn sm ${DB.settings.practiceMode==='sentence'?'accent':''}" data-act="setMode" data-v="sentence">只句子</button>
+        <button class="btn sm ${DB.settings.practiceMode==='word'?'accent':''}" data-act="setMode" data-v="word">只单词</button>
+      </div>
       ${capHit
         ? `<button class="btn block" data-act="startReview" style="opacity:.55">今日复习到上限了（${rDone}/${rCap}）</button>
            <p class="small muted" style="margin:8px 0 0">想接着做，去「数据」页把这个上限调高。没做完的词明天还在，不会丢。</p>`
@@ -650,6 +877,7 @@ function viewRead(){
     <div class="small" style="margin-bottom:6px;color:${notLearned > b.words.length*0.6 ? 'var(--accent)' : 'var(--muted)'}">本篇 ${b.words.length} 个目标词，其中 <b>${notLearned}</b> 个还没学过</div>
     <h2 style="font-size:18px;margin-bottom:10px">${esc(a.title||'未命名')}</h2>
     <div class="row" style="margin-bottom:12px">${switchBtns}${trBtn}</div>
+    <div class="readbar">${readBarHTML()}</div>
     <div class="article" id="art">${artHtml}</div>
   </div>` : `<div class="card"><div class="empty">这一批没有文章<br><span class="small">生成时选了「只要词表」，所以没有文章和题目。直接去复习就行。</span></div></div>`}
 
@@ -695,19 +923,24 @@ function splitParas(text){
 }
 function articleHTML(text, showTr, translation){
   const paras = splitParas(text);
+  let si = 0;
   return paras.map((p, i)=>{
-    const s = esc(p);
-    const marked = s.replace(/(\*\*[^*]+\*\*)|([A-Za-z][A-Za-z'’\-]*)/g, (m, bold, plain)=>{
-      if(bold){
-        const inner = bold.slice(2,-2);
-        const clean = inner.replace(/[.,;:!?"'’)]+$/,'');
-        return `<span class="w" data-act="lookup" data-w="${clean}">${inner}</span>`;
-      }
-      if(plain && plain.length>=3 && !STOP.has(plain.toLowerCase())) return `<span class="w2" data-act="lookup" data-w="${plain}">${plain}</span>`;
-      return m;
-    });
+    const sents = splitSentences(p);
+    const inner = sents.map((sent)=>{
+      const s = esc(sent);
+      const marked = s.replace(/(\*\*[^*]+\*\*)|([A-Za-z][A-Za-z'’\-]*)/g, (m, bold, plain)=>{
+        if(bold){
+          const inner = bold.slice(2,-2);
+          const clean = inner.replace(/[.,;:!?"'’)]+$/,'');
+          return '<span class="w" data-act="lookup" data-w="' + clean + '">' + inner + '</span>';
+        }
+        if(plain && plain.length>=3 && !STOP.has(plain.toLowerCase())) return '<span class="w2" data-act="lookup" data-w="' + plain + '">' + plain + '</span>';
+        return m;
+      });
+      return '<span class="sent" data-act="sayFrom" data-si="' + (si++) + '">' + marked + '</span> ';
+    }).join('');
     const zh = (showTr && translation[i]) ? `<div class="tr">${esc(translation[i])}</div>` : '';
-    return `<p>${marked}</p>${zh}`;
+    return `<p>${inner}</p>${zh}`;
   }).join('');
 }
 function writingHTML(b){
@@ -748,11 +981,38 @@ function writingHTML(b){
 }
 
 /* ---------- 测试 ---------- */
+function quizGroupOf(t){ return String(t||'')==='spell' ? 'word' : 'sentence'; }
+function quizSplit(qs){
+  const sent = [], word = [];
+  for(let i=0;i<qs.length;i++){ (quizGroupOf(qs[i].type)==='word' ? word : sent).push(i); }
+  return { sent: sent, word: word };
+}
+function groupHeadHTML(title, sub, n){
+  if(!n) return '';
+  return '<div class="card"><h2>' + title + '（' + n + ' 题）</h2><p class="small muted" style="margin:0">' + sub + '</p></div>';
+}
+function quizInputHTML(qs, i, saved){
+  const q = qs[i];
+  return '<div class="q"><div class="stem"><span class="no">' + (i+1) + '</span>' + esc(q.prompt) + '</div>' +
+    '<input data-ans="' + i + '" placeholder="在这里作答" value="' + esc(saved||'') + '" autocomplete="off"></div>';
+}
+function quizItemHTML(qs, i, r, ua){
+  const q = qs[i];
+  const ok = r.detail[i];
+  return '<div class="q"><div class="stem"><span class="no">' + (i+1) + '</span>' + esc(q.prompt) + '</div>' +
+    '<div class="small">你的答案：<b>' + esc(ua||'（空）') + '</b></div>' +
+    '<div class="fb show ' + (ok?'ok':'no') + '">' +
+    (ok ? '✓ 正确' : '✗ 正确答案：' + esc(q.answer)) +
+    (q.explain ? '<br><span class="small">' + esc(q.explain) + '</span>' : '') +
+    '</div></div>';
+}
 function viewQuiz(){
   const b = curBatch();
   if(!b) return `<div class="card"><div class="empty">还没有题目。<br><button class="btn sm" data-act="go" data-v="new" style="margin-top:10px">去加词</button></div></div>`;
   const qs = b.quiz||[];
   if(!qs.length) return `<div class="card"><div class="empty">这批没有生成题目，重开一批试试。</div></div>`;
+
+  const g = quizSplit(qs);
 
   if(state.quizResult){
     const r = state.quizResult;
@@ -763,18 +1023,10 @@ function viewQuiz(){
       <p class="small muted">已自动排进复习队列，明天会抽你。</p>
       <div>${r.wrong.map(w=>`<span class="tag core">${esc(w)}</span>`).join('')}</div>
     </div>`:`<div class="card"><p class="small muted" style="margin:0">全对，没有错词。</p></div>`}
-    ${qs.map((q,i)=>{
-      const ua = state.quizAnswers[i]||'';
-      const ok = r.detail[i];
-      return `<div class="q">
-        <div class="stem"><span class="no">${i+1}</span>${esc(q.prompt)}</div>
-        <div class="small">你的答案：<b>${esc(ua||'（空）')}</b></div>
-        <div class="fb show ${ok?'ok':'no'}">
-          ${ok?'✓ 正确':'✗ 正确答案：'+esc(q.answer)}
-          ${q.explain?'<br><span class="small">'+esc(q.explain)+'</span>':''}
-        </div>
-      </div>`;
-    }).join('')}
+    ${groupHeadHTML('句子题','语境：看懂句子、填词、辨搭配',g.sent.length)}
+    ${g.sent.map(i=>quizItemHTML(qs,i,r,state.quizAnswers[i])).join('')}
+    ${groupHeadHTML('单词题','脱离句子：只看词本身',g.word.length)}
+    ${g.word.map(i=>quizItemHTML(qs,i,r,state.quizAnswers[i])).join('')}
     <button class="btn primary block" data-act="resetQuiz">再做一遍</button>
     <button class="btn block" data-act="go" data-v="home" style="margin-top:8px">回首页</button>`;
   }
@@ -782,12 +1034,12 @@ function viewQuiz(){
   return `
   <div class="card">
     <h2>闭卷测试（${qs.length} 题）</h2>
-    <p class="small muted">别往上翻文章，先做完再看答案。</p>
+    <p class="small muted">分两组：句子题考语境，单词题考拼写。别往上翻文章，先做完再看答案。</p>
   </div>
-  ${qs.map((q,i)=>`<div class="q">
-    <div class="stem"><span class="no">${i+1}</span>${esc(q.prompt)}</div>
-    <input data-ans="${i}" placeholder="在这里作答" value="${esc(state.quizAnswers[i]||'')}" autocomplete="off">
-  </div>`).join('')}
+  ${groupHeadHTML('句子题','语境：看懂句子、填词、辨搭配',g.sent.length)}
+  ${g.sent.map(i=>quizInputHTML(qs,i,state.quizAnswers[i])).join('')}
+  ${groupHeadHTML('单词题','脱离句子：只看词本身',g.word.length)}
+  ${g.word.map(i=>quizInputHTML(qs,i,state.quizAnswers[i])).join('')}
   <button class="btn accent block" data-act="submitQuiz">交卷</button>`;
 }
 
@@ -821,6 +1073,23 @@ function viewData(){
     <label class="fld"><span>每天复习上限（0 = 不限，建议 40–80）</span>
       <input id="s_reviewPerDay" type="number" min="0" max="500" value="${Number(s.reviewPerDay)||0}">
     </label>
+    <label class="fld"><span>每批词数上限（建议 10–12；超过 15 文章会写得生硬）</span>
+      <input id="s_maxWords" type="number" min="5" max="25" value="${Number(s.maxWords)||12}">
+    </label>
+    <label class="fld"><span>练习模式</span>
+      <select id="s_practiceMode">
+        <option value="all"${(s.practiceMode||'all')==='all'?' selected':''}>句子 + 单词（推荐）</option>
+        <option value="sentence"${s.practiceMode==='sentence'?' selected':''}>只练句子（语境）</option>
+        <option value="word"${s.practiceMode==='word'?' selected':''}>只练单词（拼写）</option>
+      </select>
+    </label>
+    <label class="fld"><span>朗读语速：<b id="rateVal">${voiceRateLabel()}</b></span>
+      <input id="s_voiceRate" type="range" min="0.5" max="1.5" step="0.1" value="${voiceRate()}">
+    </label>
+    <label class="fld"><span>朗读音色（设备上所有英文音色，挑顺耳的）</span>
+      <select id="s_voice">${voiceOptionsHTML()}</select>
+    </label>
+    <button class="btn sm" data-act="refreshVoices" style="margin-bottom:10px">刷新音色列表</button>
     <button class="btn primary block" data-act="saveSettings">保存设置</button>
     <div class="sep"></div>
     <h2 style="font-size:14px">发音自检</h2>
@@ -869,11 +1138,12 @@ let pendingImage = null;
 
 function bind(){
   document.querySelectorAll('#tabs button').forEach(btn=>{
-    btn.onclick = ()=>{ state.view = btn.dataset.v; render(); window.scrollTo(0,0); };
+    btn.onclick = ()=>{ stopReading(true); state.view = btn.dataset.v; render(); window.scrollTo(0,0); };
   });
   document.querySelectorAll('[data-act]').forEach(el=>{
     el.onclick = (e)=>{
-      if(el.dataset.act === 'say' && e && e.stopPropagation){ e.stopPropagation(); }
+      const a = el.dataset.act;
+      if((a === 'say' || a === 'lookup' || a === 'sayFrom') && e && e.stopPropagation){ e.stopPropagation(); }
       handleAct(el);
     };
   });
@@ -944,6 +1214,27 @@ function handleAct(el){
   if(act==='generate'){ doGenerate(); return; }
   if(act==='word'){ showWord(curBatch().words[+el.dataset.i]); return; }
   if(act==='say'){ sayWord(el.dataset.w); return; }
+  if(act==='sayFrom'){ readFromSi(el.dataset.si); return; }
+  if(act==='readArticle'){ readArticle(); return; }
+  if(act==='readPause'){ togglePauseRead(); return; }
+  if(act==='readStop'){ stopReading(false); toast('已停止'); return; }
+  if(act==='cycleRate'){ cycleRate(); return; }
+  if(act==='refreshVoices'){ refreshVoices(); return; }
+  if(act==='setMode'){
+    const m = el.dataset.v||'all';
+    DB.settings.practiceMode = (m==='sentence'||m==='word') ? m : 'all';
+    save(); render();
+    toast('练习模式：' + (m==='sentence'?'只练句子':(m==='word'?'只练单词':'句子+单词')));
+    return;
+  }
+  if(act==='revPickSent'){
+    const c = state.reviewQueue[state.reviewIdx];
+    if(!c) return;
+    const so = sentTranslateOptions(c);
+    const ok = !!so && String(el.dataset.v||'').trim() === so.zh;
+    showReviewAnswer(c, ok);
+    return;
+  }
   if(act==='voiceSelftest'){ voiceSelftest(); return; }
   if(act==='lookup'){ lookupWord(el.dataset.w); return; }
   if(act==='addWord'){ addWordFromArticle(el.dataset.w); return; }
@@ -1242,15 +1533,33 @@ function lev(a,b){
   }
   return prev[n];
 }
+function normCN(s){
+  return String(s==null?'':s)
+    .replace(/（[^）]*）|\([^)]*\)/g,'')
+    .replace(/【[^】]*】|\[[^\]]*\]/g,'')
+    .replace(/[①②③④⑤⑥⑦⑧⑨⑩]/g,'')
+    .replace(/[，。、；：！？（）【】《》…—·\-\s]/g,'')
+    .toLowerCase();
+}
+function judgeCN(u, cand){
+  if(u === cand) return true;
+  if(u.length < 2) return false;
+  if(cand.indexOf(u) >= 0 && u.length >= Math.ceil(cand.length * 0.5)) return true;
+  if(u.indexOf(cand) >= 0 && cand.length >= Math.ceil(u.length * 0.5)) return true;
+  return false;
+}
 function judgeAnswer(type, ua, answer){
-  const u = norm(ua);
-  if(!u) return false;
-  const cands = String(answer||'').split('|').map(norm).filter(Boolean);
-  if(!cands.length) return false;
+  const raw = String(ua==null?'':ua);
+  if(!raw.trim()) return false;
+  const list = String(answer||'').split('|');
   if(type==='spell'){
-    return cands.some(a => Math.abs(a.length-u.length)<=1 && lev(a,u)<=1);
+    const u = norm(raw);
+    if(!u) return false;
+    return list.map(norm).filter(Boolean).some(a => Math.abs(a.length-u.length)<=1 && lev(a,u)<=1);
   }
-  return cands.some(a => a===u);
+  const u2 = normCN(raw);
+  if(!u2) return false;
+  return list.map(normCN).filter(Boolean).some(a => a===u2 || judgeCN(u2, a));
 }
 function findWordForQuiz(b, q){
   if(q.word){
@@ -1329,11 +1638,26 @@ function renderReviewCard(){
   if(!c){ closeSheet(); render(); toast('今天复习完了'); return; }
   showReviewQuestion(c);
 }
+const ALL_TYPES = ['word-zh','word-en','word-ipa','sent-en','sent-zh'];
+function modeTypes(mode){
+  if(mode==='sentence') return ['sent-zh','sent-en'];
+  if(mode==='word') return ['word-zh','word-en','word-ipa'];
+  return ALL_TYPES.slice();
+}
 function typeLabel(t){
-  if(t==='recall') return '英文→中文';
-  if(t==='cloze') return '例句填空';
-  if(t==='ipa') return '看音标写词';
-  return '中文→英文';
+  if(t==='word-zh') return '单词 · 英译中';
+  if(t==='word-en') return '单词 · 中译英';
+  if(t==='word-ipa') return '单词 · 音标拼写';
+  if(t==='sent-en') return '句子 · 中译英';
+  if(t==='sent-zh') return '句子 · 英译中';
+  if(t==='recall') return '单词 · 英译中';
+  if(t==='spell') return '单词 · 中译英';
+  if(t==='cloze') return '句子 · 中译英';
+  if(t==='ipa') return '单词 · 音标拼写';
+  return '单词 · 中译英';
+}
+function typeGroup(t){
+  return (t==='word-zh'||t==='word-en'||t==='word-ipa'||t==='spell'||t==='recall'||t==='ipa') ? 'word' : 'sentence';
 }
 function findWordData(word){
   const k = key(word);
@@ -1381,50 +1705,122 @@ function buildRecallOptions(c){
   const opts = picked.concat([right]);
   return opts.sort(()=> Math.random()-0.5);
 }
+let __zhPool = null, __zhPoolLen = -1;
+function zhSentencePool(){
+  const total = Object.keys(DB.cards).length;
+  if(__zhPool && __zhPoolLen === total) return __zhPool;
+  const out = [];
+  const seen = Object.create(null);
+  for(let i=0;i<DB.batches.length;i++){
+    const ws = (DB.batches[i] && DB.batches[i].words) || [];
+    for(let j=0;j<ws.length;j++){
+      const ss = (ws[j] && ws[j].sentences) || [];
+      for(let m=0;m<ss.length;m++){
+        const z = String((ss[m] && ss[m].zh) || '').trim();
+        if(z.length >= 4 && !seen[z]){ seen[z] = 1; out.push(z); }
+        if(out.length >= 600) break;
+      }
+    }
+  }
+  __zhPool = out; __zhPoolLen = total;
+  return out;
+}
+function sentTranslateOptions(c){
+  const info = findWordData(c.word);
+  if(!info || !Array.isArray(info.sentences)) return null;
+  let pick = null;
+  for(let i=0;i<info.sentences.length;i++){
+    const s = info.sentences[i];
+    if(s && s.en && s.zh){ pick = s; break; }
+  }
+  if(!pick) return null;
+  const right = String(pick.zh).trim();
+  const pool = [];
+  const all = zhSentencePool();
+  for(let i=0;i<all.length;i++){ if(all[i] !== right) pool.push(all[i]); }
+  if(pool.length < 3) return null;
+  const picked = pool.slice().sort(()=> Math.random()-0.5).slice(0,3);
+  const opts = picked.concat([right]).sort(()=> Math.random()-0.5);
+  return { en: String(pick.en||''), zh: right, opts: opts };
+}
+function typeAvailable(t, c, info){
+  if(t==='word-zh') return buildRecallOptions(c).length >= 4;
+  if(t==='word-en') return !!String(c.word||'').trim() && !!String(c.meaning||'').trim();
+  if(t==='word-ipa') return !!(info.ipa || c.ipa);
+  if(t==='sent-en') return !!clozeSentence(c);
+  if(t==='sent-zh') return !!sentTranslateOptions(c);
+  return false;
+}
+
 function pickReviewType(c){
   const info = findWordData(c.word) || {};
-  const order = ['spell','recall','cloze','ipa'];
-  let t = order[(c.reps||0) % 4];
-  if(t==='recall' && buildRecallOptions(c).length < 4) t = 'spell';
-  if(t==='cloze' && !clozeSentence(c)) t = 'spell';
-  if(t==='ipa' && !(info.ipa || c.ipa)) t = 'spell';
-  return t;
+  const mode = DB.settings.practiceMode || 'all';
+  const primary = modeTypes(mode);
+  const secondary = [];
+  for(let i=0;i<ALL_TYPES.length;i++){ if(primary.indexOf(ALL_TYPES[i]) < 0) secondary.push(ALL_TYPES[i]); }
+  const base = (c.reps||0) % primary.length;
+  for(let k=0;k<primary.length;k++){
+    const t = primary[(base + k) % primary.length];
+    if(typeAvailable(t, c, info)) return t;
+  }
+  for(let k=0;k<secondary.length;k++){
+    if(typeAvailable(secondary[k], c, info)) return secondary[k];
+  }
+  return 'word-en';
 }
 function showReviewQuestion(c){
   const t = pickReviewType(c);
   state.revType = t;
   const info = findWordData(c.word) || {};
-  const head = `<p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length} · ${typeLabel(t)}</p>`;
-  if(t==='recall'){
+  const ipa = esc(info.ipa || c.ipa || '');
+  const head = '<p class="small muted" style="margin:0 0 6px">' + (state.reviewIdx+1) + ' / ' + state.reviewQueue.length + ' · ' + typeLabel(t) + '</p>';
+
+  if(t==='word-zh'){
     const opts = buildRecallOptions(c);
-    openSheet(head + `
-      <h3 style="margin-bottom:4px">${esc(c.word)}${sndBtn(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
-      <p class="small muted" style="margin-bottom:10px">选出正确的释义</p>
-      ${opts.map(o=>`<button class="btn block" style="margin-bottom:8px;text-align:left;justify-content:flex-start" data-act="revPick" data-v="${esc(o)}">${esc(o)}</button>`).join('')}
-    `);
+    openSheet(head +
+      '<h3 style="margin-bottom:4px">' + esc(c.word) + sndBtn(c.word) + ' <span class="muted" style="font-weight:400;font-size:13px">' + ipa + '</span></h3>' +
+      '<p class="small muted" style="margin-bottom:10px">这个词是什么意思？</p>' +
+      opts.map(function(o){ return '<button class="btn block" style="margin-bottom:8px;text-align:left;justify-content:flex-start" data-act="revPick" data-v="' + esc(o) + '">' + esc(o) + '</button>'; }).join('')
+    );
     return;
   }
-  let body = '';
-  if(t==='spell'){
-    body = `<h3 style="margin-bottom:6px">${esc(c.meaning)}</h3>
-      <p class="small muted">看释义，写出英文单词</p>`;
-  }else if(t==='ipa'){
-    body = `<h3 style="margin-bottom:6px">${esc(info.ipa || c.ipa || '')}</h3>
-      <p class="small muted">${esc(info.pos||'')}<br>看音标和释义，写出英文单词</p>`;
-  }else{
-    const cz = clozeSentence(c);
-    body = `<p style="font-size:16px;line-height:1.75;margin:0 0 6px">${esc(cz.en)}</p>
-      <p class="small muted">${esc(cz.zh)}</p>
-      <p class="small muted" style="margin-top:6px">填出空格里的那个词</p>`;
+  if(t==='sent-zh'){
+    const so = sentTranslateOptions(c);
+    if(so){
+      openSheet(head +
+        '<p style="font-size:16px;line-height:1.75;margin:0 0 4px">' + esc(so.en) + '</p>' +
+        '<p class="small muted" style="margin-bottom:10px">这句话的中文意思是？</p>' +
+        so.opts.map(function(o){ return '<button class="btn block" style="margin-bottom:8px;text-align:left;justify-content:flex-start" data-act="revPickSent" data-v="' + esc(o) + '">' + esc(o) + '</button>'; }).join('')
+      );
+      return;
+    }
   }
-  openSheet(head + body + `
-    <input id="revInput" placeholder="输入英文单词" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin:10px 0">
-    <div id="revHintBox" class="small" style="margin:-4px 0 10px;color:var(--accent);min-height:16px"></div>
-    <button class="btn primary block" data-act="revCheck">对答案</button>
-    <button class="btn block" data-act="revHint" style="margin-top:8px">💡 想不起来？给个提示</button>
-  `);
+
+  let body = '';
+  if(t==='word-en'){
+    body = '<h3 style="margin-bottom:6px">' + esc(c.meaning) + '</h3><p class="small muted">写出英文单词</p>';
+  }else if(t==='word-ipa'){
+    body = '<h3 style="margin-bottom:6px">' + ipa + '</h3><p class="small muted">' + esc(info.pos||'') + '<br>看音标，写出英文单词</p>';
+  }else if(t==='sent-en'){
+    const cz = clozeSentence(c);
+    if(cz){
+      body = '<p class="small muted" style="margin:0 0 4px">把下面这句翻成英文，把空缺补上：</p>' +
+        '<p style="font-size:16px;line-height:1.75;margin:0 0 8px">' + esc(cz.zh) + '</p>' +
+        '<div style="font-size:15px;line-height:1.9;background:var(--soft);padding:10px 12px;border-radius:8px">' + esc(cz.en) + '</div>' +
+        '<p class="small muted" style="margin-top:6px">空格里是本批词里的哪一个？</p>';
+    }
+  }
+  if(!body){
+    body = '<h3 style="margin-bottom:6px">' + esc(c.meaning) + '</h3><p class="small muted">写出英文单词</p>';
+  }
+  openSheet(head + body +
+    '<input id="revInput" placeholder="输入英文单词" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin:10px 0">' +
+    '<div id="revHintBox" class="small" style="margin:-4px 0 10px;color:var(--accent);min-height:16px"></div>' +
+    '<button class="btn primary block" data-act="revCheck">对答案</button>' +
+    '<button class="btn block" data-act="revHint" style="margin-top:8px">💡 想不起来？给个提示</button>'
+  );
   const inp = $('#revInput');
-  if(inp){ inp.focus(); inp.onkeydown = e=>{ if(e.key==='Enter') doRevCheck(); }; }
+  if(inp){ inp.focus(); inp.onkeydown = function(e){ if(e.key==='Enter') doRevCheck(); }; }
 }
 function doRevCheck(){
   const c = state.reviewQueue[state.reviewIdx];
@@ -1437,11 +1833,14 @@ function doRevCheck(){
 function showReviewAnswer(c, ok){
   const info = findWordData(c.word) || {};
   const s0 = (info.sentences && info.sentences[0]) ? info.sentences[0] : null;
+  const isSent = (state.revType==='sent-zh' || state.revType==='sent-en');
   openSheet(`
     <p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length}${c.__retry?' · 错词回炉':''}</p>
     <h3>${esc(c.word)}${sndBtn(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
     <p>${esc(c.meaning)}</p>
-    ${s0?`<p class="small muted" style="margin:6px 0 0">${esc(s0.en||'')}<br>${esc(s0.zh||'')}</p>`:''}
+    ${s0?(isSent
+      ? `<p class="small" style="margin:6px 0 0;padding:9px 11px;background:var(--soft);border-radius:8px;line-height:1.75">${esc(s0.en||'')}<br><span class="muted">${esc(s0.zh||'')}</span></p>`
+      : `<p class="small muted" style="margin:6px 0 0">${esc(s0.en||'')}<br>${esc(s0.zh||'')}</p>`):''}
     <div class="fb show ${ok?'ok':'no'}">${ok?'✓ 想起来了':'✗ 没想起来'}</div>
     <div class="row" style="margin-top:12px">
       <button class="btn" data-act="grade" data-g="0">完全忘了</button>
@@ -1484,6 +1883,14 @@ function saveSettings(){
   DB.settings.newPerDay = Math.max(0, parseInt($('#s_newPerDay').value, 10) || 0);
   const rp = $('#s_reviewPerDay');
   if(rp) DB.settings.reviewPerDay = Math.min(500, Math.max(0, parseInt(rp.value, 10) || 0));
+  const mw = $('#s_maxWords');
+  if(mw) DB.settings.maxWords = clampNum(mw.value, 5, 25, 12);
+  const pm = $('#s_practiceMode');
+  if(pm) DB.settings.practiceMode = (pm.value==='sentence'||pm.value==='word') ? pm.value : 'all';
+  const vr = $('#s_voiceRate');
+  if(vr) DB.settings.voiceRate = clampNum(vr.value, 0.5, 1.5, 1);
+  const vc = $('#s_voice');
+  if(vc){ DB.settings.voiceName = vc.value || ''; pickVoiceByName(DB.settings.voiceName); }
   save(); render(); toast('已保存');
 }
 function download(name, content, type){
@@ -1857,7 +2264,10 @@ function selfTest(){
     ['fill','from scratch','from scratch',true],
     ['fill','scratch','from scratch',false],
     ['sense','①极其重要的','①极其重要的|②生气勃勃的',true],
-    ['collocation','tune up','tune up|tune in',true]
+    ['collocation','tune up','tune up|tune in',true],
+    ['sense','极其重要的','①极其重要的',true],
+    ['sense','极其重要','①极其重要的',true],
+    ['fill','fromscratch','from scratch',true]
   ];
   return cases.map(function(c){
     var got = judgeAnswer(c[0], c[1], c[2]);
@@ -1867,6 +2277,7 @@ function selfTest(){
 
 /* ============ 启动 ============ */
 detectVoice();
+try{ pickVoiceByName(DB.settings.voiceName); }catch(e){}
 try{ console.log('[词汇教练] ' + APP_VERSION + ' (' + BUILD + ')  语音=' + (VOICE.api?'有接口':'无接口')); }catch(e){}
 render();
 if(location.search.indexOf('selftest') >= 0){
