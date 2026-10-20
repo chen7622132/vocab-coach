@@ -134,6 +134,19 @@ code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:12.5px;f
 .readbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .qgroup{font-size:12px;color:var(--muted);margin:0 0 8px}
 input[type=range]{padding:0;border:0;background:none}
+.opt{display:flex;align-items:flex-start;gap:9px;width:100%;text-align:left;border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:11px 12px;margin-bottom:8px;font:inherit;font-size:14.5px;line-height:1.55;cursor:pointer;color:var(--ink);min-height:46px;transition:.12s}
+.opt .k{flex:none;width:20px;height:20px;border-radius:50%;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--muted);margin-top:2px}
+.opt:active{transform:scale(.995)}
+.opt.sel{border-color:#a8a29e;background:var(--soft)}
+.opt.sel .k{background:var(--ink);color:#fff;border-color:var(--ink)}
+.opt.ok{border-color:#86efac;background:#f0fdf4}
+.opt.ok .k{background:var(--ok);color:#fff;border-color:var(--ok)}
+.opt.no{border-color:#fca5a5;background:#fef2f2}
+.opt.no .k{background:var(--bad);color:#fff;border-color:var(--bad)}
+.opt[disabled]{cursor:default}
+.stage{background:var(--soft);border:1px dashed var(--line);border-radius:9px;padding:13px;text-align:center}
+.stage p{margin:0 0 9px;font-size:13px;color:var(--muted)}
+.hintw{font-family:ui-monospace,monospace;letter-spacing:1.5px;color:var(--accent);font-size:13px}
 </style>
 </head>
 <body>
@@ -157,7 +170,7 @@ input[type=range]{padding:0;border:0;background:none}
 
 <script>
 /* ============ 存储 ============ */
-const APP_VERSION = 'v19';
+const APP_VERSION = 'v20';
 const BUILD = '2026-10-20';
 const LS_KEY = 'vocab_coach_db_v1';
 const REVIEW_PER_ROUND = 20;
@@ -172,7 +185,8 @@ const DEFAULTS = {
     maxWords:12,
     practiceMode:'all',
     voiceName:'',
-    voiceRate:1
+    voiceRate:1,
+    twoStage:true
   },
   batches:[], cards:{}, activeBatchId:null, reviewLog:[]
 };
@@ -180,7 +194,8 @@ let DB = load();
 let state = {
   view:'home', busy:false, quizAnswers:{}, quizResult:null,
   reviewQueue:[], reviewIdx:0, showTranslation:false, whichArticle:'main',
-  preview:null, retried:{}, revType:null
+  preview:null, retried:{}, revType:null,
+  revealed:{}, optLocked:{}
 };
 
 function load(){
@@ -286,7 +301,7 @@ JSON 结构（严格遵守字段名）：
 2. 一词多义时，两句尽量覆盖不同义项；senses 列出全部义项（含未在例句中出现的）。
 3. ipa 用英式或美式音标均可；cefr 只填 A1/A2/B1/B2/C1；derivatives 填派生词或高频搭配，没有就空字符串。
 4. article：用全部词写一篇 130–200 词的叙事短文（开头-冲突-结尾），读起来要像真人写的小故事，不要为了塞词而写生硬句子；目标词全部出现并用 **加粗**，wordCount 填实际词数。translation 必须逐段对应 text，段数完全相同。
-5. quiz：8–12 题，只用 fill（例句挖空）/spell（给中文释义写英文）/sense（判断该词在此句的词义）/collocation（搭配辨析）；answer 多个可接受答案用 | 分隔；不要出选择题；每题的 word 必须是 words 里出现过的词原形。
+5. quiz：8–12 题，题型只用 fill（例句挖空）/spell（给中文释义写英文）/sense（判断该词在此句的词义）/collocation（搭配辨析）。可以出选择题，但必须把选项写在 prompt 末尾并严格用「(A) 选项 (B) 选项 (C) 选项 (D) 选项」这一段格式，answer 填正确选项的原文（不要填字母）；填空/拼写类不要带选项。answer 多个可接受答案用 | 分隔；每题的 word 必须是 words 里出现过的词原形。
 6. 全部用简体中文解释，英文只用在例句和单词本身。
 7. words 最多 ${o.maxWords} 个：超过 ${o.maxWords} 个就只保留最值得学的 ${o.maxWords} 个（优先中高频、易混、考试常见）；不足 5 个时把原文里能找到的都列出来，不要编造。
 8. 每个词必须有 tips：2–3 句中文讲「怎么记」——词根/词源、高频搭配、易混词对比、记忆钩子，任选最有用的写，不要空话。
@@ -981,26 +996,130 @@ function writingHTML(b){
 }
 
 /* ---------- 测试 ---------- */
+
+/* ============ 题干选项解析（兼容 AI 多种写法） ============ */
+function parseOptions(prompt){
+  const text = String(prompt||'');
+  let opts = [];
+  let m;
+  /* 格式一：(A) xxx (B) xxx   也支持中文全角括号 */
+  const reParen = /[(（]\s*([A-Da-d])\s*[)）]\s*([^()（）]*?)(?=[(（]\s*[A-Da-d]\s*[)）]|$)/g;
+  while((m = reParen.exec(text)) !== null){
+    const body = String(m[2]||'').trim().replace(/[；;，,]$/, '');
+    if(body) opts.push({ key: m[1].toUpperCase(), text: body });
+  }
+  /* 格式二：A. xxx  B. xxx */
+  if(opts.length < 2){
+    opts = [];
+    const reDot = /(?:^|[\s　])([A-D])\s*[.、)]\s*([^\s].*?)(?=(?:[\s　]+[A-D]\s*[.、)])|$)/g;
+    while((m = reDot.exec(text)) !== null){
+      const body = String(m[2]||'').trim().replace(/[；;，,]$/, '');
+      if(body) opts.push({ key: m[1].toUpperCase(), text: body });
+    }
+  }
+  if(opts.length < 2) return { stem: text, options: [] };
+  /* 把选项从题干里剥掉，只留问题本身 */
+  let cut = text.length;
+  const ip = text.search(/[(（]\s*[A-Da-d]\s*[)）]/);
+  const id = text.search(/(?:^|[\s　])A\s*[.、)]/);
+  if(ip >= 0) cut = Math.min(cut, ip);
+  if(id >= 0) cut = Math.min(cut, id);
+  let stem = cut < text.length ? text.slice(0, cut) : text;
+  stem = stem.replace(/[\s　]*[，,;；:：]$/, '').trim();
+  if(!stem) stem = text;
+  return { stem: stem, options: opts };
+}
+function spellHint(q){
+  const raw = String((q && q.answer) || '').split('|')[0].trim();
+  const w = raw.replace(/[^A-Za-z]/g, '');
+  if(w.length < 2 || w.length > 24) return '';
+  return w.charAt(0) + ' ' + '_ '.repeat(w.length - 1).trim() + '　' + w.length + ' 个字母';
+}
+function judgeChoice(q, opt){
+  if(!opt) return false;
+  if(judgeAnswer('fill', opt.text, q.answer)) return true;
+  return judgeAnswer('fill', opt.key, q.answer);
+}
+function findOpt(pk, k){
+  const key = String(k||'').toUpperCase();
+  for(let i=0;i<pk.options.length;i++){ if(pk.options[i].key === key) return pk.options[i]; }
+  return null;
+}
+function choiceBtnsHTML(qs, i, pk){
+  const q = qs[i];
+  const chosen = String(state.quizAnswers[i] || '');
+  const locked = !!(state.optLocked && state.optLocked[i]);
+  return pk.options.map(function(o){
+    let cls = 'opt';
+    if(locked){
+      const right = judgeChoice(q, o);
+      if(o.key === chosen) cls += right ? ' ok' : ' no';
+      else if(right) cls += ' ok';
+    } else if(o.key === chosen){ cls += ' sel'; }
+    return '<button class="' + cls + '" data-act="chooseOpt" data-i="' + i + '" data-k="' + o.key + '"' +
+      (locked ? ' disabled' : '') + '><span class="k">' + o.key + '</span><span>' + esc(o.text) + '</span></button>';
+  }).join('');
+}
+function stageHTML(qs, i, pk){
+  const keys = pk.options.map(function(o){ return o.key; }).join(' / ');
+  return '<div class="stage"><p>这一题有选项。先在脑子里回想一下，再看选项。</p>' +
+    '<button class="btn sm" data-act="revealOpts" data-i="' + i + '">看选项（' + keys + '）</button></div>';
+}
+function quizBodyHTML(qs, i){
+  const q = qs[i];
+  const pk = parseOptions(q.prompt);
+  if(pk.options.length >= 2){
+    const revealed = (DB.settings.twoStage === false) || !!(state.revealed && state.revealed[i]);
+    return revealed ? choiceBtnsHTML(qs, i, pk) : stageHTML(qs, i, pk);
+  }
+  return '';
+}
+function scrollNextQ(i){
+  const n = document.getElementById('qb' + (i+1));
+  if(n && n.scrollIntoView){ try{ n.scrollIntoView({ block:'start', behavior:'smooth' }); }catch(e){} }
+}
+
 function quizGroupOf(t){ return String(t||'')==='spell' ? 'word' : 'sentence'; }
 function quizSplit(qs){
   const sent = [], word = [];
   for(let i=0;i<qs.length;i++){ (quizGroupOf(qs[i].type)==='word' ? word : sent).push(i); }
   return { sent: sent, word: word };
 }
-function groupHeadHTML(title, sub, n){
+function groupHeadHTML(title, sub, n, otherN){
   if(!n) return '';
-  return '<div class="card"><h2>' + title + '（' + n + ' 题）</h2><p class="small muted" style="margin:0">' + sub + '</p></div>';
+  const solo = (otherN === 0);
+  const head = solo ? ('共 ' + n + ' 题，都是' + title) : (title + '（' + n + ' 题）');
+  return '<div class="card"><h2>' + head + '</h2><p class="small muted" style="margin:0">' + sub + '</p></div>';
 }
 function quizInputHTML(qs, i, saved){
   const q = qs[i];
-  return '<div class="q"><div class="stem"><span class="no">' + (i+1) + '</span>' + esc(q.prompt) + '</div>' +
-    '<input data-ans="' + i + '" placeholder="在这里作答" value="' + esc(saved||'') + '" autocomplete="off"></div>';
+  const pk = parseOptions(q.prompt);
+  const head = '<div class="q" id="qb' + i + '"><div class="stem"><span class="no">' + (i+1) + '</span>' + esc(pk.stem) + '</div>';
+  if(pk.options.length >= 2){
+    return head + quizBodyHTML(qs, i) + '</div>';
+  }
+  const hint = spellHint(q);
+  return head +
+    (hint ? '<p class="small muted" style="margin:0 0 8px">提示：<span class="hintw">' + esc(hint) + '</span></p>' : '') +
+    '<input data-ans="' + i + '" placeholder="在这里作答" value="' + esc(saved||'') + '" autocomplete="off" autocapitalize="off" spellcheck="false"></div>';
 }
 function quizItemHTML(qs, i, r, ua){
   const q = qs[i];
   const ok = r.detail[i];
-  return '<div class="q"><div class="stem"><span class="no">' + (i+1) + '</span>' + esc(q.prompt) + '</div>' +
-    '<div class="small">你的答案：<b>' + esc(ua||'（空）') + '</b></div>' +
+  const pk = parseOptions(q.prompt);
+  let ans;
+  if(pk.options.length >= 2){
+    const chosen = findOpt(pk, ua);
+    ans = '<div class="small">你的答案：<b>' +
+      (chosen ? (chosen.key + '. ' + esc(chosen.text)) : esc(ua || '（空）')) + '</b></div>' +
+      '<div class="small muted" style="margin:4px 0 0">' +
+      pk.options.map(function(o){ return (judgeChoice(q, o) ? '✓ ' : '· ') + o.key + '. ' + esc(o.text); }).join('<br>') +
+      '</div>';
+  }else{
+    ans = '<div class="small">你的答案：<b>' + esc(ua || '（空）') + '</b></div>';
+  }
+  return '<div class="q"><div class="stem"><span class="no">' + (i+1) + '</span>' + esc(pk.stem) + '</div>' +
+    ans +
     '<div class="fb show ' + (ok?'ok':'no') + '">' +
     (ok ? '✓ 正确' : '✗ 正确答案：' + esc(q.answer)) +
     (q.explain ? '<br><span class="small">' + esc(q.explain) + '</span>' : '') +
@@ -1023,9 +1142,9 @@ function viewQuiz(){
       <p class="small muted">已自动排进复习队列，明天会抽你。</p>
       <div>${r.wrong.map(w=>`<span class="tag core">${esc(w)}</span>`).join('')}</div>
     </div>`:`<div class="card"><p class="small muted" style="margin:0">全对，没有错词。</p></div>`}
-    ${groupHeadHTML('句子题','语境：看懂句子、填词、辨搭配',g.sent.length)}
+    ${groupHeadHTML('句子题','语境：看懂句子、填词、辨搭配',g.sent.length,g.word.length)}
     ${g.sent.map(i=>quizItemHTML(qs,i,r,state.quizAnswers[i])).join('')}
-    ${groupHeadHTML('单词题','脱离句子：只看词本身',g.word.length)}
+    ${groupHeadHTML('单词题','脱离句子：只看词本身',g.word.length,g.sent.length)}
     ${g.word.map(i=>quizItemHTML(qs,i,r,state.quizAnswers[i])).join('')}
     <button class="btn primary block" data-act="resetQuiz">再做一遍</button>
     <button class="btn block" data-act="go" data-v="home" style="margin-top:8px">回首页</button>`;
@@ -1034,11 +1153,11 @@ function viewQuiz(){
   return `
   <div class="card">
     <h2>闭卷测试（${qs.length} 题）</h2>
-    <p class="small muted">分两组：句子题考语境，单词题考拼写。别往上翻文章，先做完再看答案。</p>
+    <p class="small muted">分两组：句子题考语境，单词题考拼写。选择题点了就判对错（只记第一次），填空写完统一交卷。</p>
   </div>
-  ${groupHeadHTML('句子题','语境：看懂句子、填词、辨搭配',g.sent.length)}
+  ${groupHeadHTML('句子题','语境：看懂句子、填词、辨搭配',g.sent.length,g.word.length)}
   ${g.sent.map(i=>quizInputHTML(qs,i,state.quizAnswers[i])).join('')}
-  ${groupHeadHTML('单词题','脱离句子：只看词本身',g.word.length)}
+  ${groupHeadHTML('单词题','脱离句子：只看词本身',g.word.length,g.sent.length)}
   ${g.word.map(i=>quizInputHTML(qs,i,state.quizAnswers[i])).join('')}
   <button class="btn accent block" data-act="submitQuiz">交卷</button>`;
 }
@@ -1082,6 +1201,10 @@ function viewData(){
         <option value="sentence"${s.practiceMode==='sentence'?' selected':''}>只练句子（语境）</option>
         <option value="word"${s.practiceMode==='word'?' selected':''}>只练单词（拼写）</option>
       </select>
+    </label>
+    <label class="small" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 12px">
+      <input type="checkbox" id="s_twoStage" style="width:auto;margin:3px 0 0"${s.twoStage===false?'':' checked'}>
+      <span>选择题先自己回想，再点开选项（更费脑、记得更牢；嫌慢可以关掉）</span>
     </label>
     <label class="fld"><span>朗读语速：<b id="rateVal">${voiceRateLabel()}</b></span>
       <input id="s_voiceRate" type="range" min="0.5" max="1.5" step="0.1" value="${voiceRate()}">
@@ -1159,6 +1282,13 @@ function bind(){
   };
   document.querySelectorAll('[data-ans]').forEach(inp=>{
     inp.oninput = ()=>{ state.quizAnswers[inp.dataset.ans] = inp.value; };
+    inp.onfocus = ()=>{
+      try{
+        setTimeout(function(){
+          if(inp.scrollIntoView) inp.scrollIntoView({ block:'center', behavior:'smooth' });
+        }, 280);
+      }catch(e){}
+    };
   });
   const imp = $('#importFile');
   if(imp) imp.onchange = e=>{
@@ -1213,6 +1343,40 @@ function handleAct(el){
   if(act==='clearImg'){ pendingImage=null; $('#imgPrev').innerHTML=''; el.disabled=true; return; }
   if(act==='generate'){ doGenerate(); return; }
   if(act==='word'){ showWord(curBatch().words[+el.dataset.i]); return; }
+  if(act==='revealOpts'){
+    const i = parseInt(el.dataset.i, 10) || 0;
+    if(!state.revealed) state.revealed = {};
+    state.revealed[i] = true;
+    const b = curBatch();
+    const box = document.getElementById('qb' + i);
+    if(b && box && b.quiz && b.quiz[i]){
+      const pk = parseOptions(b.quiz[i].prompt);
+      box.innerHTML = '<div class="stem"><span class="no">' + (i+1) + '</span>' + esc(pk.stem) + '</div>' + choiceBtnsHTML(b.quiz, i, pk);
+      bind();
+    }
+    return;
+  }
+  if(act==='chooseOpt'){
+    const i = parseInt(el.dataset.i, 10) || 0;
+    const k = String(el.dataset.k || '').toUpperCase();
+    if(state.optLocked && state.optLocked[i]) return;
+    const b = curBatch();
+    if(!b || !b.quiz || !b.quiz[i]) return;
+    const q = b.quiz[i];
+    const pk = parseOptions(q.prompt);
+    const opt = findOpt(pk, k);
+    if(!opt) return;
+    state.quizAnswers[i] = k;
+    if(!state.optLocked) state.optLocked = {};
+    state.optLocked[i] = true;
+    const box = document.getElementById('qb' + i);
+    if(box){
+      box.innerHTML = '<div class="stem"><span class="no">' + (i+1) + '</span>' + esc(pk.stem) + '</div>' + choiceBtnsHTML(b.quiz, i, pk);
+      bind();
+    }
+    if(judgeChoice(q, opt)) setTimeout(function(){ scrollNextQ(i); }, 650);
+    return;
+  }
   if(act==='say'){ sayWord(el.dataset.w); return; }
   if(act==='sayFrom'){ readFromSi(el.dataset.si); return; }
   if(act==='readArticle'){ readArticle(); return; }
@@ -1245,14 +1409,14 @@ function handleAct(el){
   if(act==='writeSubmit'){ submitWriting(+el.dataset.stage); return; }
   if(act==='mark'){ toggleMark(+el.dataset.i); return; }
   if(act==='submitQuiz'){ submitQuiz(); return; }
-  if(act==='resetQuiz'){ state.quizResult=null; state.quizAnswers={}; render(); return; }
+  if(act==='resetQuiz'){ state.quizResult=null; state.quizAnswers={}; state.revealed={}; state.optLocked={}; render(); window.scrollTo(0,0); return; }
   if(act==='startReview'){ startReview(); return; }
   if(act==='revCheck'){ doRevCheck(); return; }
   if(act==='saveSettings'){ saveSettings(); return; }
   if(act==='export'){ exportDB(); return; }
   if(act==='exportAnki'){ exportAnki(); return; }
   if(act==='wipe'){ if(confirm('确定清空所有词和记录？不可恢复。')){ DB=structuredClone(DEFAULTS); save(); render(); } return; }
-  if(act==='switchBatch'){ DB.activeBatchId = el.dataset.id; state.whichArticle='main'; state.showTranslation=false; save(); render(); return; }
+  if(act==='switchBatch'){ DB.activeBatchId = el.dataset.id; state.whichArticle='main'; state.showTranslation=false; state.quizAnswers={}; state.quizResult=null; state.revealed={}; state.optLocked={}; save(); render(); return; }
   if(act==='sheetClose'){ closeSheet(); return; }
   if(act==='grade'){ gradeReview(+el.dataset.g); return; }
 }
@@ -1603,7 +1767,14 @@ function submitQuiz(){
   const detail = []; const hitWord = []; const wrong = [];
   let correct = 0;
   qs.forEach((q,i)=>{
-    const ok = judgeAnswer(q.type, state.quizAnswers[i], q.answer);
+    const pk = parseOptions(q.prompt);
+    const ua = state.quizAnswers[i];
+    let ok;
+    if(pk.options.length >= 2){
+      ok = judgeChoice(q, findOpt(pk, ua));
+    }else{
+      ok = judgeAnswer(q.type, ua, q.answer);
+    }
     detail.push(ok); if(ok) correct++;
     const w = findWordForQuiz(b,q);
     hitWord.push(w);
@@ -1891,6 +2062,8 @@ function saveSettings(){
   if(vr) DB.settings.voiceRate = clampNum(vr.value, 0.5, 1.5, 1);
   const vc = $('#s_voice');
   if(vc){ DB.settings.voiceName = vc.value || ''; pickVoiceByName(DB.settings.voiceName); }
+  const ts = $('#s_twoStage');
+  if(ts) DB.settings.twoStage = !!ts.checked;
   save(); render(); toast('已保存');
 }
 function download(name, content, type){
@@ -2269,10 +2442,19 @@ function selfTest(){
     ['sense','极其重要','①极其重要的',true],
     ['fill','fromscratch','from scratch',true]
   ];
-  return cases.map(function(c){
+  var base = cases.map(function(c){
     var got = judgeAnswer(c[0], c[1], c[2]);
     return (got===c[3]?'PASS':'FAIL') + ' | ' + c[0] + ' | "' + c[1] + '" vs "' + c[2] + '" | got=' + got + ' expect=' + c[3];
   });
+  var P = parseOptions('He _____ the plan. (A) abandoned (B) approached (C) benefited (D) campaigned');
+  base.push((P.options.length===4 ? 'PASS' : 'FAIL') + ' | 选项解析 | 括号式 A-D 数量=' + P.options.length);
+  base.push((P.stem.indexOf('(A)') < 0 && P.stem.indexOf('plan') > 0 ? 'PASS' : 'FAIL') + ' | 题干剥离 | ' + P.stem);
+  var P2 = parseOptions('Fill the blank. A. abandoned B. approached C. benefited D. campaigned');
+  base.push((P2.options.length===4 ? 'PASS' : 'FAIL') + ' | 选项解析 | 点号式 A-D 数量=' + P2.options.length);
+  var P3 = parseOptions('用 accurate 的适当形式填空');
+  base.push((P3.options.length===0 ? 'PASS' : 'FAIL') + ' | 选项解析 | 无选项题不误判');
+  base.push((judgeChoice({answer:'abandoned'},{key:'A',text:'abandoned'}) ? 'PASS' : 'FAIL') + ' | 判分 | 选项文本命中');
+  return base;
 }
 
 /* ============ 启动 ============ */
