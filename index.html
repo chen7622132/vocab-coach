@@ -161,7 +161,8 @@ const DEFAULTS = {
 let DB = load();
 let state = {
   view:'home', busy:false, quizAnswers:{}, quizResult:null,
-  reviewQueue:[], reviewIdx:0, showTranslation:false, whichArticle:'main'
+  reviewQueue:[], reviewIdx:0, showTranslation:false, whichArticle:'main',
+  preview:null, retried:{}, revType:null
 };
 
 function load(){
@@ -271,7 +272,7 @@ JSON 结构（严格遵守字段名）：
 8. 每个词必须有 tips：2–3 句中文讲「怎么记」——词根/词源、高频搭配、易混词对比、记忆钩子，任选最有用的写，不要空话。
 9. 每个词必须有 core：true 表示本批最该先掌握的核心词（最多 8 个），其余 false。
 
-学习者目标：${o.goal||'综合提升'}${o.text?('\n\n原文内容：\n'+o.text):''}`;
+学习者目标：${o.goal||'综合提升'}${o.onlyWords?'\n\n【本次只要词表】不要写文章、不要出题：article 返回 {"title":"","genre":"","wordCount":0,"text":"","translation":[]}，quiz 返回空数组 []。':''}${o.text?('\n\n原文内容：\n'+o.text):''}`;
 }
 
 /* ============ 图片压缩 ============ */
@@ -365,12 +366,13 @@ function render(){
     meta.textContent = DB.activeBatchId ? ('批次 '+(i+1)+'/'+DB.batches.length) : '';
   }
   const v = state.view;
-  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on', b.dataset.v===v));
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on', b.dataset.v===(v==='preview'?'new':v)));
   const app = $('#app');
   if(v==='home') app.innerHTML = viewHome();
   else if(v==='new') app.innerHTML = viewNew();
   else if(v==='read') app.innerHTML = viewRead();
   else if(v==='quiz') app.innerHTML = viewQuiz();
+  else if(v==='preview') app.innerHTML = viewPreview();
   else app.innerHTML = viewData();
   bind();
 }
@@ -444,6 +446,10 @@ function viewNew(){
     <label class="fld"><span>或者直接粘贴词表 / 一段英文（图片识别失败时用这个）</span>
       <textarea id="pasteText" placeholder="例：stationery  proclaim  scandal …&#10;或者整段英文课文"></textarea>
     </label>
+    <label class="small" style="display:flex;align-items:center;gap:8px;margin:10px 0">
+      <input type="checkbox" id="onlyWords" style="width:auto;margin:0">
+      <span>只要词表（不写文章、不出题，更快更省）</span>
+    </label>
     <button class="btn accent block" data-act="generate" ${state.busy?"disabled":""}>
       ${state.busy?'<span class="spin"></span> 生成中，约 20–40 秒…':'② 生成一套练习 →'}
     </button>
@@ -466,6 +472,8 @@ function viewRead(){
   const showTr = !!state.showTranslation && hasTr;
   const artHtml = articleHTML(a.text||'', showTr, tr);
   const extra = b.words.filter(w=>w.fromArticle).length;
+  let notLearned = 0;
+  b.words.forEach(w=>{ const cc = DB.cards[key(w.word)]; if(!cc || (cc.reps||0)===0) notLearned++; });
 
   const switchBtns = b.article2
     ? `<button class="btn sm ${!isDia?'accent':''}" data-act="switchArt" data-v="main">故事版</button>
@@ -477,12 +485,13 @@ function viewRead(){
     : `<button class="btn sm" data-act="toggleTr">补一份全文翻译</button>`;
 
   return `
-  <div class="card">
+  ${a.text ? `<div class="card">
     <div class="small muted" style="margin-bottom:6px">${esc(a.genre||'叙事文')} · ${esc(String(a.wordCount||''))} 词 · 点任意单词查释义</div>
+    <div class="small" style="margin-bottom:6px;color:${notLearned > b.words.length*0.6 ? 'var(--accent)' : 'var(--muted)'}">本篇 ${b.words.length} 个目标词，其中 <b>${notLearned}</b> 个还没学过</div>
     <h2 style="font-size:18px;margin-bottom:10px">${esc(a.title||'未命名')}</h2>
     <div class="row" style="margin-bottom:12px">${switchBtns}${trBtn}</div>
     <div class="article" id="art">${artHtml}</div>
-  </div>
+  </div>` : `<div class="card"><div class="empty">这一批没有文章<br><span class="small">生成时选了「只要词表」，所以没有文章和题目。直接去复习就行。</span></div></div>`}
 
   <details class="card">
     <summary>② 语境预热：${b.words.length} 个词 × 2 句（点开先扫一眼）</summary>
@@ -739,6 +748,26 @@ function handleAct(el){
   if(act==='libPage'){ libState.page = Math.max(1, parseInt(el.dataset.p,10)||1); refreshLib(); return; }
   if(act==='cardDetail'){ cardDetail(el.dataset.k); return; }
   if(act==='delBatch'){ deleteBatch(el.dataset.id); return; }
+  if(act==='pvToggle'){ if(state.preview){ state.preview.sel[+el.dataset.i] = !!el.checked; render(); } return; }
+  if(act==='pvAll'){ if(state.preview){ state.preview.sel = state.preview.sel.map(()=> el.dataset.v==='1'); render(); } return; }
+  if(act==='pvConfirm'){ confirmPreview(); return; }
+  if(act==='pvCancel'){ state.preview = null; state.view = 'new'; render(); toast('已放弃这次生成'); return; }
+  if(act==='revHint'){
+    const c = state.reviewQueue[state.reviewIdx];
+    if(!c) return;
+    const info = findWordData(c.word) || {};
+    const w = String(c.word||'');
+    const b = $('#revHintBox');
+    if(b) b.textContent = '提示：' + w.charAt(0) + ' ' + '_ '.repeat(Math.max(0, w.length-1)).trim() + '（共 ' + w.length + ' 个字母' + (info.pos ? '，' + info.pos : '') + '）';
+    return;
+  }
+  if(act==='revPick'){
+    const c = state.reviewQueue[state.reviewIdx];
+    if(!c) return;
+    const ok = String(el.dataset.v||'').trim() === String(c.meaning||'').trim();
+    showReviewAnswer(c, ok);
+    return;
+  }
   if(act==='go'){ state.view = el.dataset.v; render(); window.scrollTo(0,0); return; }
   if(act==='clearImg'){ pendingImage=null; $('#imgPrev').innerHTML=''; el.disabled=true; return; }
   if(act==='generate'){ doGenerate(); return; }
@@ -776,10 +805,12 @@ async function doGenerate(){
   state.busy = true; render();
   try{
     const hasImg = !!pendingImage;
+    const onlyWordsEl = $('#onlyWords');
+    const onlyWords = !!(onlyWordsEl && onlyWordsEl.checked);
     const content = hasImg
-      ? [{type:'text', text: buildPrompt({goal, text, hasImage:true})},
+      ? [{type:'text', text: buildPrompt({goal, text, hasImage:true, onlyWords:onlyWords})},
          {type:'image_url', image_url:{url: pendingImage}}]
-      : buildPrompt({goal, text, hasImage:false});
+      : buildPrompt({goal, text, hasImage:false, onlyWords:onlyWords});
     const model = hasImg ? DB.settings.visionModel : DB.settings.textModel;
 
     const raw = await callAI(content, model);
@@ -794,26 +825,17 @@ async function doGenerate(){
     }
     if(!data.words || !data.words.length) throw new Error('没提取到单词。照片可能太糊或词太多，试着只拍一小块。');
 
-    const batch = {
-      id: 'b'+Date.now(),
-      createdAt: todayStr(),
-      goal: goal,
-      words: data.words.slice(0,25).map(normalizeWord),
-      article: data.article || {title:'未命名', genre:'叙事文', wordCount:0, text:'', translation:[]},
-      quiz: (data.quiz||[]).map(normalizeQuiz).filter(q=>q.prompt)
-    };
-    DB.batches.push(batch);
-    DB.activeBatchId = batch.id;
-    batch.words.forEach(w=>upsertCard(w, batch.id));
-    save();
+    const words = data.words.slice(0,25).map(normalizeWord);
+    const article = onlyWords
+      ? {title:'', genre:'', wordCount:0, text:'', translation:[]}
+      : (data.article || {title:'未命名', genre:'叙事文', wordCount:0, text:'', translation:[]});
+    const quiz = onlyWords ? [] : (data.quiz||[]).map(normalizeQuiz).filter(q=>q.prompt);
 
-    pendingImage = null;
-    state.quizAnswers = {}; state.quizResult = null;
-    state.showTranslation = false; state.whichArticle = 'main';
+    state.preview = { goal: goal, words: words, article: article, quiz: quiz, sel: words.map(()=>true) };
     state.busy = false;
-    state.view = 'read';
+    state.view = 'preview';
     render(); window.scrollTo(0,0);
-    toast('生成完成：'+batch.words.length+' 个词');
+    toast('识别到 '+words.length+' 个词，确认后才会入库');
   }catch(e){
     state.busy = false; render();
     showError(e.message||String(e));
@@ -1115,18 +1137,108 @@ function startReview(){
   const due = dueCards();
   if(!due.length){ toast('今天没有到期的词'); return; }
   state.reviewQueue = due.slice(0,20);
+  state.retried = {};
   state.reviewIdx = 0;
   renderReviewCard();
 }
 function renderReviewCard(){
   const c = state.reviewQueue[state.reviewIdx];
   if(!c){ closeSheet(); render(); toast('今天复习完了'); return; }
-  openSheet(`
-    <p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length}</p>
-    <h3 style="margin-bottom:6px">${esc(c.meaning)}</h3>
-    <p class="small muted">${esc(c.ipa||'')}　（看释义，写出英文单词）</p>
+  showReviewQuestion(c);
+}
+function typeLabel(t){
+  if(t==='recall') return '英文→中文';
+  if(t==='cloze') return '例句填空';
+  if(t==='ipa') return '看音标写词';
+  return '中文→英文';
+}
+function findWordData(word){
+  const k = key(word);
+  for(let i=DB.batches.length-1;i>=0;i--){
+    const b = DB.batches[i];
+    if(!b || !Array.isArray(b.words)) continue;
+    const w = b.words.find(x=> key(x.word)===k);
+    if(w) return w;
+  }
+  return null;
+}
+function clozeSentence(c){
+  const info = findWordData(c.word);
+  if(!info || !Array.isArray(info.sentences)) return null;
+  const target = String(c.word||'').toLowerCase();
+  if(!target) return null;
+  const isLetter = ch => ch >= 'a' && ch <= 'z';
+  for(let si=0; si<info.sentences.length; si++){
+    const s = info.sentences[si];
+    if(!s || !s.en) continue;
+    const en = String(s.en);
+    const low = en.toLowerCase();
+    let idx = low.indexOf(target);
+    while(idx >= 0){
+      const before = idx > 0 ? low.charAt(idx-1) : ' ';
+      const after = low.charAt(idx + target.length);
+      if(!isLetter(before) && !isLetter(after)){
+        return { en: en.slice(0, idx) + '____' + en.slice(idx + target.length), zh: s.zh || '' };
+      }
+      idx = low.indexOf(target, idx+1);
+    }
+  }
+  return null;
+}
+function buildRecallOptions(c){
+  const right = String(c.meaning||'').trim();
+  if(!right) return [];
+  const pool = [];
+  Object.values(DB.cards).forEach(x=>{
+    const m = String(x.meaning||'').trim();
+    if(m && m!==right && pool.indexOf(m)<0) pool.push(m);
+  });
+  if(pool.length < 3) return [];
+  const picked = pool.sort(()=> Math.random()-0.5).slice(0,3);
+  const opts = picked.concat([right]);
+  return opts.sort(()=> Math.random()-0.5);
+}
+function pickReviewType(c){
+  const info = findWordData(c.word) || {};
+  const order = ['spell','recall','cloze','ipa'];
+  let t = order[(c.reps||0) % 4];
+  if(t==='recall' && buildRecallOptions(c).length < 4) t = 'spell';
+  if(t==='cloze' && !clozeSentence(c)) t = 'spell';
+  if(t==='ipa' && !(info.ipa || c.ipa)) t = 'spell';
+  return t;
+}
+function showReviewQuestion(c){
+  const t = pickReviewType(c);
+  state.revType = t;
+  const info = findWordData(c.word) || {};
+  const head = `<p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length} · ${typeLabel(t)}</p>`;
+  if(t==='recall'){
+    const opts = buildRecallOptions(c);
+    openSheet(head + `
+      <h3 style="margin-bottom:4px">${esc(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
+      <p class="small muted" style="margin-bottom:10px">选出正确的释义</p>
+      ${opts.map(o=>`<button class="btn block" style="margin-bottom:8px;text-align:left;justify-content:flex-start" data-act="revPick" data-v="${esc(o)}">${esc(o)}</button>`).join('')}
+    `);
+    return;
+  }
+  let body = '';
+  if(t==='spell'){
+    body = `<h3 style="margin-bottom:6px">${esc(c.meaning)}</h3>
+      <p class="small muted">看释义，写出英文单词</p>`;
+  }else if(t==='ipa'){
+    body = `<h3 style="margin-bottom:6px">${esc(info.ipa || c.ipa || '')}</h3>
+      <p class="small muted">${esc(info.pos||'')}<br>看音标和释义，写出英文单词</p>`;
+  }else{
+    const cz = clozeSentence(c);
+    body = `<p style="font-size:16px;line-height:1.75;margin:0 0 6px">${esc(cz.en)}</p>
+      <p class="small muted">${esc(cz.zh)}</p>
+      <p class="small muted" style="margin-top:6px">填出空格里的那个词</p>`;
+  }
+  openSheet(head + body + `
     <input id="revInput" placeholder="输入英文单词" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin:10px 0">
+    <div id="revHintBox" class="small" style="margin:-4px 0 10px;color:var(--accent);min-height:16px"></div>
     <button class="btn primary block" data-act="revCheck">对答案</button>
+    <button class="btn block" data-act="revHint" style="margin-top:8px">💡 想不起来？给个提示</button>
   `);
   const inp = $('#revInput');
   if(inp){ inp.focus(); inp.onkeydown = e=>{ if(e.key==='Enter') doRevCheck(); }; }
@@ -1137,10 +1249,16 @@ function doRevCheck(){
   const el = $('#revInput');
   const v = el ? el.value : '';
   const ok = judgeAnswer('spell', v, c.word);
+  showReviewAnswer(c, ok);
+}
+function showReviewAnswer(c, ok){
+  const info = findWordData(c.word) || {};
+  const s0 = (info.sentences && info.sentences[0]) ? info.sentences[0] : null;
   openSheet(`
-    <p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length}</p>
-    <h3>${esc(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(c.ipa||'')}</span></h3>
+    <p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length}${c.__retry?' · 错词回炉':''}</p>
+    <h3>${esc(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
     <p>${esc(c.meaning)}</p>
+    ${s0?`<p class="small muted" style="margin:6px 0 0">${esc(s0.en||'')}<br>${esc(s0.zh||'')}</p>`:''}
     <div class="fb show ${ok?'ok':'no'}">${ok?'✓ 想起来了':'✗ 没想起来'}</div>
     <div class="row" style="margin-top:12px">
       <button class="btn" data-act="grade" data-g="0">完全忘了</button>
@@ -1151,7 +1269,23 @@ function doRevCheck(){
 }
 function gradeReview(g){
   const c = state.reviewQueue[state.reviewIdx];
-  if(c){ schedule(c, g); logReview(c, g); save(); }
+  if(c){
+    const k = key(c.word);
+    if(c.__retry){
+      logReview(c, g);
+    }else{
+      schedule(c, g);
+      logReview(c, g);
+      if(g < 2){
+        if(!state.retried) state.retried = {};
+        if(!state.retried[k]){
+          state.retried[k] = true;
+          state.reviewQueue.push(Object.assign({}, c, {__retry:true}));
+        }
+      }
+    }
+    save();
+  }
   state.reviewIdx++;
   if(state.reviewIdx >= state.reviewQueue.length){ closeSheet(); render(); toast('本轮复习完成'); }
   else renderReviewCard();
@@ -1451,6 +1585,63 @@ function chartDaily(){
     <text x="${W-pad}" y="${H-3}" font-size="8.5" fill="#78716c" text-anchor="end">今天</text>
     <text x="${W-pad}" y="11" font-size="8.5" fill="#78716c" text-anchor="end">峰值 ${max} 次/天</text>
   </svg>`;
+}
+
+
+/* ============ 生成预览 / 确认入库 ============ */
+function viewPreview(){
+  const p = state.preview;
+  if(!p){
+    return `<div class="card"><div class="empty">没有待确认的内容<br><button class="btn sm" data-act="go" data-v="new" style="margin-top:10px">去生成</button></div></div>`;
+  }
+  const n = p.sel.filter(Boolean).length;
+  return `
+  <div class="card">
+    <h2>确认要导入的词（${n} / ${p.words.length}）</h2>
+    <p class="small muted" style="margin:6px 0">勾掉不要的（识别错、太简单、已经会了的），再点最下面确认。</p>
+    <div class="row" style="margin:8px 0 4px">
+      <button class="btn sm" data-act="pvAll" data-v="1">全选</button>
+      <button class="btn sm" data-act="pvAll" data-v="0">全不选</button>
+    </div>
+    ${p.words.map((w,i)=>`
+      <label style="display:flex;gap:10px;align-items:flex-start;padding:9px 2px;border-bottom:1px solid var(--line)">
+        <input type="checkbox" data-act="pvToggle" data-i="${i}" ${p.sel[i]?'checked':''} style="width:auto;margin:4px 0 0 0;flex:none">
+        <span style="flex:1;min-width:0">
+          <b>${esc(w.word)}</b>
+          <span class="small muted">${esc(w.pos||'')} ${esc(w.ipa||'')}</span>
+          <span class="small muted" style="display:block">${esc(w.meaning||'')}</span>
+        </span>
+      </label>`).join('')}
+    <button class="btn primary block" data-act="pvConfirm" style="margin-top:14px" ${n?'':'disabled'}>确认导入 ${n} 个词</button>
+    <button class="btn block" data-act="pvCancel" style="margin-top:8px">放弃这次生成</button>
+  </div>
+  <p class="muted small">${(p.article && p.article.text) ? '会同时保存文章与题目。' : '这一批没有文章和题目（生成时选了「只要词表」）。'}</p>`;
+}
+function confirmPreview(){
+  const p = state.preview;
+  if(!p) return;
+  const picked = p.words.filter((w,i)=> p.sel[i]);
+  if(!picked.length){ toast('一个词都没选，勾几个再确认'); return; }
+  const batch = {
+    id: 'b'+Date.now(),
+    createdAt: todayStr(),
+    goal: p.goal,
+    words: picked,
+    article: p.article || {title:'', genre:'', wordCount:0, text:'', translation:[]},
+    quiz: p.quiz || []
+  };
+  DB.batches.push(batch);
+  DB.activeBatchId = batch.id;
+  batch.words.forEach(w=> upsertCard(w, batch.id));
+  save();
+  state.preview = null;
+  pendingImage = null;
+  state.quizAnswers = {}; state.quizResult = null;
+  state.showTranslation = false; state.whichArticle = 'main';
+  state.retried = {};
+  state.view = 'read';
+  render(); window.scrollTo(0,0);
+  toast('已导入 '+batch.words.length+' 个词');
 }
 
 /* ============ Sheet ============ */
