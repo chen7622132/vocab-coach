@@ -125,6 +125,9 @@ code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:12.5px;f
 .legend .lg{display:inline-flex;align-items:center;gap:4px}
 .legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
 .statrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.snd{background:none;border:0;padding:0 5px;margin:0;font-size:14px;line-height:1;cursor:pointer;opacity:.7;vertical-align:middle;font-family:inherit}
+.snd:active{transform:scale(.88);opacity:1}
+.snd.off{opacity:.35;cursor:help}
 </style>
 </head>
 <body>
@@ -148,13 +151,18 @@ code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:12.5px;f
 
 <script>
 /* ============ 存储 ============ */
+const APP_VERSION = 'v18';
+const BUILD = '2026-10-20';
 const LS_KEY = 'vocab_coach_db_v1';
+const REVIEW_PER_ROUND = 20;
+
 const DEFAULTS = {
   settings:{
     apiKey:'', baseUrl:'https://api.deepseek.com', proxy:'',
     visionModel:'deepseek-v4-flash-vision-exp',
     textModel:'deepseek-v4-flash',
-    newPerDay:20
+    newPerDay:20,
+    reviewPerDay:60
   },
   batches:[], cards:{}, activeBatchId:null, reviewLog:[]
 };
@@ -295,6 +303,131 @@ function compressImage(file, maxSide, quality){
   });
 }
 
+
+/* ============ 发音（Web Speech API · 含鸿蒙坚盾降级） ============ */
+const VOICE = { api:false, voice:null, blocked:false, started:false, warned:false, probing:false };
+
+function detectVoice(){
+  try{
+    VOICE.api = !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function');
+  }catch(e){ VOICE.api = false; }
+  if(!VOICE.api) return;
+  const pick = function(){
+    let vs = [];
+    try{ vs = window.speechSynthesis.getVoices() || []; }catch(e){ vs = []; }
+    if(!vs.length) return;
+    const en = [];
+    for(let i=0;i<vs.length;i++){
+      const l = String(vs[i].lang || '');
+      if(/^en([-_]|$)/i.test(l)) en.push(vs[i]);
+    }
+    if(!en.length){ VOICE.voice = null; return; }
+    VOICE.voice = en[0];
+    for(let i=0;i<en.length;i++){
+      if(/en[-_]US/i.test(String(en[i].lang||''))){ VOICE.voice = en[i]; break; }
+    }
+  };
+  pick();
+  try{
+    if(window.speechSynthesis.addEventListener) window.speechSynthesis.addEventListener('voiceschanged', pick);
+    else window.speechSynthesis.onvoiceschanged = pick;
+  }catch(e){}
+}
+function canSpeak(){ return VOICE.api && !VOICE.blocked; }
+
+/* 能力探测：不支持就完全不渲染按钮（不是点了没反应） */
+function sndBtn(word){
+  if(!canSpeak()) return '';
+  const w = String(word||'').trim();
+  if(!w) return '';
+  return '<button class="snd" data-act="say" data-w="' + esc(w) + '" title="朗读" aria-label="朗读">🔊</button>';
+}
+function sayWord(word){
+  const w = String(word||'').trim();
+  if(!w) return;
+  if(!canSpeak()){ speakFallback(w); return; }
+  VOICE.started = false;
+  try{
+    const u = new SpeechSynthesisUtterance(w);
+    if(VOICE.voice){ u.voice = VOICE.voice; u.lang = VOICE.voice.lang || 'en-US'; }
+    else { u.lang = 'en-US'; }
+    u.rate = 0.9; u.pitch = 1; u.volume = 1;
+    u.onstart = function(){ VOICE.started = true; };
+    u.onerror = function(ev){
+      const code = ev && ev.error ? String(ev.error) : '';
+      if(code === 'interrupted' || code === 'canceled') return;   /* 正常打断，不算禁用 */
+      markVoiceBlocked('系统拒绝发声（' + (code || 'unknown') + '）');
+    };
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+    /* 鸿蒙/部分 WebView：speak 不抛错、不触发 onstart，也永远不出声 —— 靠状态探测兜住 */
+    setTimeout(function(){
+      if(VOICE.started || VOICE.blocked) return;
+      let busy = false;
+      try{ busy = !!(window.speechSynthesis.speaking || window.speechSynthesis.pending); }catch(e){ busy = false; }
+      if(!busy) markVoiceBlocked('设备没有响应语音合成');
+    }, 900);
+  }catch(e){ markVoiceBlocked('语音接口调不起来'); }
+}
+function markVoiceBlocked(why){
+  VOICE.blocked = true;
+  if(!VOICE.warned){
+    VOICE.warned = true;
+    toast('🔇 ' + why + '。可能开了坚盾守护/省电限制，已改用音标，其它功能不受影响');
+  }
+  try{ render(); }catch(e){}
+}
+/* 最终降级：不发声也要给到能用的东西 —— 音标 */
+function speakFallback(w){
+  const info = findWordData(w) || {};
+  const c = DB.cards[key(w)];
+  const ipa = String(info.ipa || (c && c.ipa) || '').trim();
+  let msg = '这台设备的语音合成不可用';
+  if(ipa) msg += '\n\n音标：' + ipa;
+  msg += '\n\n可以照着音标自己拼读，或换台设备听。';
+  alert(msg);
+}
+/* 手动强制切到降级态（数据页“发音自检”用） */
+function voiceSelftest(){
+  if(!VOICE.api){
+    alert('结果：这台设备没有语音合成接口\n\n浏览器不支持 Web Speech API，发音按钮不会出现。\n这不影响背单词，音标照常显示。');
+    return;
+  }
+  if(VOICE.blocked){
+    alert('结果：接口存在，但已被系统禁用\n\n' + (VOICE.warned ? '刚才已经自动切到音标模式。' : '') + '\n可能是鸿蒙坚盾守护模式或省电策略。');
+    return;
+  }
+  sayWord('vocabulary');
+  setTimeout(function(){
+    alert(VOICE.started
+      ? '结果：发音正常可用 ✓\n\n听到 "vocabulary" 就说明没问题。'
+      : '结果：接口在，但没有声音\n\n系统多半禁用了语音合成，按钮已自动隐藏，改用音标。');
+  }, 1200);
+}
+
+function voiceStateText(){
+  if(!VOICE.api) return '本机没有语音合成接口（浏览器不支持），发音按钮不显示，音标照常可看。';
+  if(VOICE.blocked) return '语音接口被系统禁用了（常见于鸿蒙坚盾守护/省电模式），已改用音标。';
+  if(!VOICE.voice) return '语音接口可用，但还没读到英文语音包。点下方按钮测一下。';
+  return '语音接口正常，当前音色：' + (VOICE.voice.name || '英文语音') + '。';
+}
+
+/* ============ 今日复习计数（去重：同一个词当天只算一次，错词回炉不重复计） ============ */
+function todayReviewCount(){
+  const t = todayStr();
+  const log = Array.isArray(DB.reviewLog) ? DB.reviewLog : [];
+  const seen = Object.create(null);
+  let n = 0;
+  for(let i=0;i<log.length;i++){
+    const x = log[i];
+    if(!x || x.d !== t) continue;
+    const k = String(x.k || '');
+    if(!k || seen[k]) continue;
+    seen[k] = 1; n++;
+  }
+  return n;
+}
+
 /* ============ 间隔序列 ============ */
 const STEPS = [1,3,7,14,30,60];
 function schedule(card, grade){
@@ -405,12 +538,16 @@ function viewHome(){
   const limit = Number(DB.settings.newPerDay)||0;
   const todayNew = todayNewCount();
   const overLimit = limit>0 && todayNew>limit;
+  const rCap = Number(DB.settings.reviewPerDay)||0;
+  const rDone = todayReviewCount();
+  const capHit = rCap>0 && rDone>=rCap;
   return `
   <div class="card">
     <div class="kv"><span>待复习</span><b style="color:${due.length?'var(--accent)':'var(--ok)'}">${due.length} 个</b></div>
     <div class="kv"><span>词库总量</span><b>${total} 个</b></div>
     <div class="kv"><span>已练习过</span><b>${learned} 个</b></div>
     <div class="kv"><span>今日新词</span><b style="color:${overLimit?'var(--bad)':'inherit'}">${todayNew}${limit>0?' / '+limit:'（不限）'}</b></div>
+    <div class="kv"><span>今日复习</span><b style="color:${capHit?'var(--accent)':'inherit'}">${rDone}${rCap>0?' / '+rCap:'（不限）'}</b></div>
   </div>
   ${overLimit?`<div class="card" style="border-color:#fecaca;background:#fef2f2">
     <p class="small" style="color:var(--bad);margin:0">今天已经加了 ${todayNew} 个新词，超过你设的每天 ${limit} 个。建议今天只复习、明天再加新词——一次塞太多，明天复习量会堆到做不完。</p>
@@ -419,7 +556,10 @@ function viewHome(){
     <div class="card">
       <h2>今天要复习 ${due.length} 个词</h2>
       <p class="muted small">按遗忘曲线排的，做完就结束。</p>
-      <button class="btn accent block" data-act="startReview">开始复习 →</button>
+      ${capHit
+        ? `<button class="btn block" data-act="startReview" style="opacity:.55">今日复习到上限了（${rDone}/${rCap}）</button>
+           <p class="small muted" style="margin:8px 0 0">想接着做，去「数据」页把这个上限调高。没做完的词明天还在，不会丢。</p>`
+        : `<button class="btn accent block" data-act="startReview">开始复习 →</button>`}
     </div>`:`
     <div class="card"><div class="empty">今天没有到期的词 🎉<br><span class="small">去「新词」加一批，或明天再来。</span></div></div>`}
   ${b?`
@@ -436,7 +576,8 @@ function viewHome(){
       <p class="small muted">拍一页词典、或粘贴一段生词，30 秒生成一整套练习。</p>
       <button class="btn primary block" data-act="go" data-v="new">＋ 加第一批词</button>
     </div>`}
-  <p class="muted small" style="margin-top:18px">间隔：1 → 3 → 7 → 14 → 30 → 60 天；答错回退两步。</p>`;
+  <p class="muted small" style="margin-top:18px">间隔：1 → 3 → 7 → 14 → 30 → 60 天；答错回退两步。</p>
+  <p class="muted small" style="text-align:center;margin-top:6px">${APP_VERSION} · ${BUILD}</p>`;
 }
 
 /* ---------- 新词 ---------- */
@@ -539,7 +680,7 @@ function warmHTML(w){
 }
 function wordRowHTML(w, i){
   return `<div class="wrow" data-act="word" data-i="${i}">
-    <span class="en">${w.core?'<span class="wstar">⭐</span>':''}${esc(w.word)}</span>
+    <span class="en">${w.core?'<span class="wstar">⭐</span>':''}${esc(w.word)}</span>${sndBtn(w.word)}
     <span class="ipa">${esc(w.ipa||'')}</span>
     <span class="zh">${esc(w.meaning||'')}</span>
   </div>`;
@@ -677,7 +818,14 @@ function viewData(){
     <label class="fld"><span>每天新词上限（0 = 不限，建议 15–20）</span>
       <input id="s_newPerDay" type="number" min="0" max="500" value="${Number(s.newPerDay)||0}">
     </label>
+    <label class="fld"><span>每天复习上限（0 = 不限，建议 40–80）</span>
+      <input id="s_reviewPerDay" type="number" min="0" max="500" value="${Number(s.reviewPerDay)||0}">
+    </label>
     <button class="btn primary block" data-act="saveSettings">保存设置</button>
+    <div class="sep"></div>
+    <h2 style="font-size:14px">发音自检</h2>
+    <p class="muted small" style="margin:0 0 8px">${voiceStateText()}</p>
+    <button class="btn sm" data-act="voiceSelftest">测一下这台设备能不能发音</button>
     <p class="muted small" style="margin-top:8px">模型名会变。若报 400，去 DeepSeek 文档复制当前模型 ID 填这里。</p>
   </div>
 
@@ -713,7 +861,7 @@ function viewData(){
       </span>
     </div>`).join(''):`<p class="muted small">暂无</p>`}
   </div>
-  <p class="muted small" style="text-align:center">v2.0 · 八步闭环完整版</p>`;
+  <p class="muted small" style="text-align:center">${APP_VERSION} · ${BUILD} · 八步闭环完整版</p>`;
 }
 
 /* ============ 事件 ============ */
@@ -724,7 +872,10 @@ function bind(){
     btn.onclick = ()=>{ state.view = btn.dataset.v; render(); window.scrollTo(0,0); };
   });
   document.querySelectorAll('[data-act]').forEach(el=>{
-    el.onclick = ()=> handleAct(el);
+    el.onclick = (e)=>{
+      if(el.dataset.act === 'say' && e && e.stopPropagation){ e.stopPropagation(); }
+      handleAct(el);
+    };
   });
   const f = $('#file');
   if(f) f.onchange = async e=>{
@@ -792,6 +943,8 @@ function handleAct(el){
   if(act==='clearImg'){ pendingImage=null; $('#imgPrev').innerHTML=''; el.disabled=true; return; }
   if(act==='generate'){ doGenerate(); return; }
   if(act==='word'){ showWord(curBatch().words[+el.dataset.i]); return; }
+  if(act==='say'){ sayWord(el.dataset.w); return; }
+  if(act==='voiceSelftest'){ voiceSelftest(); return; }
   if(act==='lookup'){ lookupWord(el.dataset.w); return; }
   if(act==='addWord'){ addWordFromArticle(el.dataset.w); return; }
   if(act==='explainWord'){ explainWord(el.dataset.w); return; }
@@ -891,7 +1044,7 @@ function showWord(w){
     ? `<div class="tips"><div class="small" style="font-weight:600;margin-bottom:4px">怎么记</div><div class="small">${esc(w.tips)}</div></div>`
     : `<button class="btn sm" data-act="explainWord" data-w="${esc(w.word)}" style="margin:8px 0">补一份精讲（词根/搭配/易混/记忆钩子）</button>`;
   openSheet(`
-    <h3>${esc(w.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(w.ipa||'')}</span></h3>
+    <h3>${esc(w.word)}${sndBtn(w.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(w.ipa||'')}</span></h3>
     <p class="small muted" style="margin:2px 0 10px">${esc(w.pos||'')} ${w.cefr?'· '+esc(w.cefr):''} ${w.core?'· <span class="wstar">⭐核心</span>':''}</p>
     <p><b>${esc(w.meaning)}</b></p>
     ${(w.senses&&w.senses.length)?'<p class="small muted">义项：'+esc(w.senses.join('　'))+'</p>':''}
@@ -1156,9 +1309,19 @@ function submitQuiz(){
 function startReview(){
   const due = dueCards();
   if(!due.length){ toast('今天没有到期的词'); return; }
-  state.reviewQueue = due.slice(0,20);
+  const cap = Number(DB.settings.reviewPerDay)||0;
+  const doneToday = todayReviewCount();
+  let room = REVIEW_PER_ROUND;
+  if(cap > 0){
+    const left = cap - doneToday;
+    if(left <= 0){ toast('今天已复习 '+doneToday+' 个，到上限了（每天 '+cap+' 个）。明天继续'); return; }
+    room = Math.min(room, left);
+  }
+  if(room <= 0) room = 1;
+  state.reviewQueue = due.slice(0, room);
   state.retried = {};
   state.reviewIdx = 0;
+  if(due.length > room) toast('本轮做 '+room+' 个，今天还有 '+(due.length-room)+' 个到期');
   renderReviewCard();
 }
 function renderReviewCard(){
@@ -1235,7 +1398,7 @@ function showReviewQuestion(c){
   if(t==='recall'){
     const opts = buildRecallOptions(c);
     openSheet(head + `
-      <h3 style="margin-bottom:4px">${esc(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
+      <h3 style="margin-bottom:4px">${esc(c.word)}${sndBtn(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
       <p class="small muted" style="margin-bottom:10px">选出正确的释义</p>
       ${opts.map(o=>`<button class="btn block" style="margin-bottom:8px;text-align:left;justify-content:flex-start" data-act="revPick" data-v="${esc(o)}">${esc(o)}</button>`).join('')}
     `);
@@ -1276,7 +1439,7 @@ function showReviewAnswer(c, ok){
   const s0 = (info.sentences && info.sentences[0]) ? info.sentences[0] : null;
   openSheet(`
     <p class="small muted" style="margin:0 0 6px">${state.reviewIdx+1} / ${state.reviewQueue.length}${c.__retry?' · 错词回炉':''}</p>
-    <h3>${esc(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
+    <h3>${esc(c.word)}${sndBtn(c.word)} <span class="muted" style="font-weight:400;font-size:13px">${esc(info.ipa||c.ipa||'')}</span></h3>
     <p>${esc(c.meaning)}</p>
     ${s0?`<p class="small muted" style="margin:6px 0 0">${esc(s0.en||'')}<br>${esc(s0.zh||'')}</p>`:''}
     <div class="fb show ${ok?'ok':'no'}">${ok?'✓ 想起来了':'✗ 没想起来'}</div>
@@ -1319,6 +1482,8 @@ function saveSettings(){
   DB.settings.visionModel = $('#s_visionModel').value.trim();
   DB.settings.textModel = $('#s_textModel').value.trim();
   DB.settings.newPerDay = Math.max(0, parseInt($('#s_newPerDay').value, 10) || 0);
+  const rp = $('#s_reviewPerDay');
+  if(rp) DB.settings.reviewPerDay = Math.min(500, Math.max(0, parseInt(rp.value, 10) || 0));
   save(); render(); toast('已保存');
 }
 function download(name, content, type){
@@ -1501,7 +1666,7 @@ function cardDetail(k){
   const st = cardStatus(c);
   const b = DB.batches.find(x=> x.id===c.batchId);
   openSheet(`
-    <h2 style="margin:0 0 4px">${esc(c.word)}</h2>
+    <h2 style="margin:0 0 4px">${esc(c.word)}${sndBtn(c.word)}</h2>
     <p class="muted small" style="margin:0 0 10px">${esc(c.ipa||'')}</p>
     <div class="kv"><span>状态</span><span class="badge ${st.k}">${st.t}</span></div>
     <div class="kv"><span>释义</span><b style="text-align:right">${esc(c.meaning||'—')}</b></div>
@@ -1669,7 +1834,7 @@ function confirmPreview(){
 function openSheet(html){
   $('#sheet').innerHTML = html;
   $('#mask').classList.add('on');
-  document.querySelectorAll('#sheet [data-act]').forEach(el=>{ el.onclick = ()=>handleAct(el); });
+  document.querySelectorAll('#sheet [data-act]').forEach(el=>{ el.onclick = (e)=>{ if(el.dataset.act==='say' && e && e.stopPropagation){ e.stopPropagation(); } handleAct(el); }; });
 }
 function closeSheet(){ $('#mask').classList.remove('on'); $('#sheet').innerHTML=''; }
 $('#mask').onclick = e=>{ if(e.target.id==='mask') closeSheet(); };
@@ -1701,10 +1866,16 @@ function selfTest(){
 }
 
 /* ============ 启动 ============ */
+detectVoice();
+try{ console.log('[词汇教练] ' + APP_VERSION + ' (' + BUILD + ')  语音=' + (VOICE.api?'有接口':'无接口')); }catch(e){}
 render();
 if(location.search.indexOf('selftest') >= 0){
   var box = document.getElementById('app');
-  if(box) box.innerHTML = '<pre style="white-space:pre-wrap;font-size:13px">' + selfTest().join('\n') + '</pre>';
+  if(box){
+    box.innerHTML = '<pre style="white-space:pre-wrap;font-size:13px">' +
+      ('版本 ' + APP_VERSION + ' (' + BUILD + ')\n语音接口 ' + (VOICE.api?'有':'无') + ' · 已禁用 ' + (VOICE.blocked?'是':'否') + '\n' + '-'.repeat(28) + '\n') +
+      selfTest().join('\n') + '</pre>';
+  }
 }
 </script>
 <script>
