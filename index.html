@@ -316,6 +316,25 @@ function toggleMark(i){
   save(); render();
   toast(c.unknown ? '已标记不熟，今天会出现在待复习里' : '已取消标记');
 }
+function deleteWord(k){
+  const c = DB.cards[k];
+  if(!c){ toast('这个词不在词库里'); return; }
+  const reps = c.reps||0;
+  let msg = '从词库删除「' + (c.word||k) + '」？';
+  msg += reps>0 ? ('\n\n它已经复习过 ' + reps + ' 次，删除后复习记录也一并消失。') : '\n\n它还没有任何复习记录。';
+  msg += '\n\n文章正文不会改动，只从词库和所属批次的词表中移除。';
+  if(!confirm(msg)) return;
+  delete DB.cards[k];
+  DB.batches.forEach(b=>{
+    if(b && Array.isArray(b.words)) b.words = b.words.filter(w=> key(w.word) !== k);
+  });
+  if(Array.isArray(DB.reviewLog)) DB.reviewLog = DB.reviewLog.filter(x=> x && x.k !== k);
+  if(Array.isArray(state.reviewQueue)) state.reviewQueue = state.reviewQueue.filter(x=> key(x.word) !== k);
+  save();
+  closeSheet();
+  render();
+  toast('已删除「' + (c.word||k) + '」');
+}
 function deleteBatch(id){
   const b = DB.batches.find(x=> x.id===id);
   if(!b) return;
@@ -748,6 +767,7 @@ function handleAct(el){
   if(act==='libPage'){ libState.page = Math.max(1, parseInt(el.dataset.p,10)||1); refreshLib(); return; }
   if(act==='cardDetail'){ cardDetail(el.dataset.k); return; }
   if(act==='delBatch'){ deleteBatch(el.dataset.id); return; }
+  if(act==='delWord'){ deleteWord(el.dataset.k); return; }
   if(act==='pvToggle'){ if(state.preview){ state.preview.sel[+el.dataset.i] = !!el.checked; render(); } return; }
   if(act==='pvAll'){ if(state.preview){ state.preview.sel = state.preview.sel.map(()=> el.dataset.v==='1'); render(); } return; }
   if(act==='pvConfirm'){ confirmPreview(); return; }
@@ -1492,7 +1512,8 @@ function cardDetail(k){
     ${c.last?`<div class="kv"><span>上次复习</span><span>${esc(c.last)}</span></div>`:''}
     ${b?`<div class="kv"><span>所属批次</span><span>${esc(b.goal||'未设目标')}</span></div>`:''}
     ${c.tips?`<p class="muted small" style="margin-top:10px">${esc(c.tips)}</p>`:''}
-    <button class="btn block" data-act="sheetClose" style="margin-top:14px">关闭</button>
+    <button class="btn block" data-act="delWord" data-k="${esc(k)}" style="margin-top:14px;color:var(--bad)">删除这个词</button>
+    <button class="btn block" data-act="sheetClose" style="margin-top:8px">关闭</button>
   `);
 }
 
